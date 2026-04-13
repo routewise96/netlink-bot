@@ -24,17 +24,32 @@ class AskQuestion(StatesGroup):
     waiting_question = State()
 
 
-def _build_links_text(user: dict) -> str:
-    """Build the two-link message for a user."""
-    vless_link = user.get("vless_link", "")
-    sub_id = user.get("sub_id", "")
-    sub_url = f"http://{SERVER_IP}:8080/profiles/{sub_id}.json" if sub_id else ""
+def _build_devices_text(devices: list[dict]) -> str:
+    """Build per-device links message."""
+    lines = ["🔗 <b>Ваши ссылки для подключения:</b>\n"]
+    lines.append(
+        "⚠️ Каждая ссылка работает строго на <b>ОДНОМ</b> устройстве. "
+        "При использовании на двух устройствах одновременно — ссылка блокируется автоматически.\n"
+    )
 
-    lines = ["🔗 <b>Ваши ссылки для подключения:</b>"]
-    if sub_url:
-        lines.append(f"\n📎 <b>Для macOS</b> (sing-box VT):\n<code>{sub_url}</code>")
-    if vless_link:
-        lines.append(f"\n📎 <b>Для iPhone / Android / Windows:</b>\n<code>{vless_link}</code>")
+    vless_lines = []
+    sub_lines = []
+
+    for d in devices:
+        num = d["device_number"]
+        if d["status"] == "active":
+            vless_lines.append(f"📱 Устройство {num}:\n<code>{d['vless_link']}</code>")
+            if d.get("subscription_url"):
+                sub_lines.append(f"Устройство {num}: <code>{d['subscription_url']}</code>")
+        else:
+            vless_lines.append(f"📱 Устройство {num}: 🔴 заблокировано")
+
+    lines.extend(vless_lines)
+
+    if sub_lines:
+        lines.append(f"\n🖥 <b>Для macOS</b> (sing-box VT):")
+        lines.extend(sub_lines)
+
     lines.append("\nНажмите 📖 Инструкция для пошаговой настройки.")
     return "\n".join(lines)
 
@@ -46,7 +61,7 @@ INSTRUCTIONS = {
 2. Скачайте и откройте
 3. Нажмите "+" в правом верхнем углу
 4. Выберите "Импорт из буфера обмена"
-5. Скопируйте ссылку из раздела "Для iPhone / Android / Windows" выше
+5. Скопируйте вашу ссылку (vless://...) выше
 6. Вернитесь в Streisand — профиль добавится автоматически
 7. Нажмите переключатель вверху для подключения
 
@@ -58,7 +73,7 @@ INSTRUCTIONS = {
 2. Скачайте и откройте
 3. Нажмите "+" в правом верхнем углу
 4. Выберите "Импорт из буфера обмена"
-5. Скопируйте ссылку из раздела "Для iPhone / Android / Windows" выше
+5. Скопируйте вашу ссылку (vless://...) выше
 6. Вернитесь в Streisand — профиль добавится автоматически
 7. Нажмите переключатель вверху для подключения
 
@@ -69,7 +84,7 @@ INSTRUCTIONS = {
 1. Скачайте Hiddify: https://hiddify.com
 2. Установите и запустите
 3. Нажмите "+" → "Добавить из буфера обмена"
-4. Скопируйте ссылку из раздела "Для iPhone / Android / Windows" выше
+4. Скопируйте вашу ссылку (vless://...) выше
 5. Вставьте — профиль добавится
 6. Нажмите "Подключить"
 
@@ -84,7 +99,7 @@ INSTRUCTIONS = {
 3. Перейдите в Profiles → New Profile
 4. Type: выберите Remote
 5. Name: NetLink
-6. URL: вставьте ссылку из раздела "Для macOS" выше
+6. URL: вставьте ссылку подписки для macOS выше
 7. Нажмите Create
 8. Перейдите в Dashboard → выберите профиль → нажмите ▶
 9. Разрешите добавление VPN-конфигурации если попросит
@@ -107,12 +122,17 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "my_link")
 async def show_link(callback: CallbackQuery):
     user = await db.get_user(callback.from_user.id)
-    if not user or user["status"] != "approved" or not user["vless_link"]:
+    if not user or user["status"] != "approved":
         await callback.answer("Доступ не активен", show_alert=True)
         return
 
+    devices = await db.get_user_devices(callback.from_user.id)
+    if not devices:
+        await callback.answer("Ссылки не найдены", show_alert=True)
+        return
+
     await callback.message.answer(
-        _build_links_text(user),
+        _build_devices_text(devices),
         reply_markup=link_and_back_kb(),
         parse_mode="HTML",
     )
@@ -158,17 +178,31 @@ async def show_devices(callback: CallbackQuery):
         await callback.answer("Доступ не активен", show_alert=True)
         return
 
+    devices = await db.get_user_devices(callback.from_user.id)
     platforms = json.loads(user["platforms"] or "[]")
     platform_names = {"iphone": "iPhone", "android": "Android", "windows": "Windows", "macos": "macOS"}
     platforms_str = ", ".join(platform_names.get(p, p) for p in platforms)
     approved_date = (user["approved_at"] or "")[:10]
 
+    lines = [
+        f"📊 <b>Ваш профиль</b>\n",
+        f"👤 {user['fio']}",
+        f"💻 Платформы: {platforms_str}",
+        f"📅 Доступ с: {approved_date}\n",
+    ]
+
+    active = sum(1 for d in devices if d["status"] == "active")
+    banned = sum(1 for d in devices if d["status"] == "banned")
+    for d in devices:
+        num = d["device_number"]
+        status_icon = "✅" if d["status"] == "active" else "🔴"
+        status_text = "активно" if d["status"] == "active" else "заблокировано"
+        lines.append(f"📱 Устройство {num}: {status_icon} {status_text}")
+
+    lines.append(f"\n📱 Активных: {active}" + (f" | 🔴 Забанено: {banned}" if banned else ""))
+
     await callback.message.answer(
-        f"📊 <b>Ваш профиль</b>\n\n"
-        f"👤 {user['fio']}\n"
-        f"📱 Устройств: {user['devices_count']}\n"
-        f"💻 Платформы: {platforms_str}\n"
-        f"📅 Доступ с: {approved_date}",
+        "\n".join(lines),
         reply_markup=main_menu_kb(),
         parse_mode="HTML",
     )

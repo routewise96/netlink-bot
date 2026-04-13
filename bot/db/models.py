@@ -20,6 +20,20 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS user_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    device_number INTEGER NOT NULL,
+    uuid TEXT NOT NULL,
+    email TEXT NOT NULL,
+    sub_id TEXT NOT NULL,
+    vless_link TEXT,
+    subscription_url TEXT,
+    status TEXT DEFAULT 'active',
+    banned_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
 CREATE TABLE IF NOT EXISTS requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER NOT NULL,

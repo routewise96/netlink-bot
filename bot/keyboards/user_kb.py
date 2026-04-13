@@ -17,7 +17,7 @@ def agreement_accept_kb() -> InlineKeyboardMarkup:
 def devices_count_kb() -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(text=f"📱 {n}", callback_data=f"devices_{n}")
-        for n in range(1, 6)
+        for n in range(1, 4)
     ]
     return InlineKeyboardMarkup(inline_keyboard=[buttons])
 

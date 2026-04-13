@@ -45,7 +45,7 @@ def get_client_by_email(email: str) -> dict | None:
     return None
 
 
-def generate_vless_link(uuid: str, email: str = "NetLink") -> str:
+def generate_vless_link(uuid: str, label: str = "NetLink") -> str:
     stream = get_stream_settings()
     reality = stream.get("realitySettings", {})
     settings = reality.get("settings", {})
@@ -64,7 +64,7 @@ def generate_vless_link(uuid: str, email: str = "NetLink") -> str:
         "sid": short_id,
         "type": "tcp",
     })
-    fragment = urllib.parse.quote(email)
+    fragment = urllib.parse.quote(label)
     return f"vless://{uuid}@{SERVER_IP}:443?{params}#{fragment}"
 
 
@@ -82,6 +82,29 @@ def update_client_limit_ip(email: str, limit_ip: int) -> None:
             if client["email"] == email:
                 client["limitIp"] = limit_ip
                 break
+        conn.execute(
+            "UPDATE inbounds SET settings = ? WHERE id = ?",
+            (json.dumps(settings), row[0]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_clients_limit_ip(emails: list[str], limit_ip: int) -> None:
+    """Batch update limitIp for multiple clients in x-ui DB (single write)."""
+    conn = sqlite3.connect(XUI_DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT id, settings FROM inbounds WHERE id=1"
+        ).fetchone()
+        if not row:
+            return
+        email_set = set(emails)
+        settings = json.loads(row[1])
+        for client in settings.get("clients", []):
+            if client["email"] in email_set:
+                client["limitIp"] = limit_ip
         conn.execute(
             "UPDATE inbounds SET settings = ? WHERE id = ?",
             (json.dumps(settings), row[0]),
