@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from bot.db import queries as db
 from bot.services import deepseek
 from bot.keyboards.user_kb import main_menu_kb, back_to_menu_kb, link_and_back_kb
-from bot.config import ADMIN_CHAT_ID, SERVER_IP
+from bot.config import ADMIN_CHAT_ID, SERVER_IP, STREISAND_ROUTE_URL
 
 router = Router()
 
@@ -38,6 +38,7 @@ def _build_devices_text(devices: list[dict]) -> str:
         "При использовании на двух устройствах одновременно — ссылка блокируется автоматически.\n"
     )
 
+    has_streisand = False
     for d in devices:
         platform = d.get("platform", "")
         label = PLATFORM_LABELS.get(platform, f"📱 Устройство {d['device_number']}")
@@ -47,31 +48,39 @@ def _build_devices_text(devices: list[dict]) -> str:
             continue
 
         if platform == "macos":
-            # macOS gets subscription URL only
             lines.append(f"{label}:\n<code>{d.get('subscription_url', '')}</code>\n")
         else:
-            # All others get vless:// only
-            lines.append(f"{label}:\n<code>{d.get('vless_link', '')}</code>\n")
+            lines.append(f"{label}:\n<code>{d.get('vless_link', '')}</code>")
+            if platform in ("iphone", "android"):
+                has_streisand = True
+            lines.append("")
+
+    if has_streisand and STREISAND_ROUTE_URL:
+        lines.append(
+            "🔧 <b>Для iPhone/Android — настройте маршрутизацию (один раз):</b>\n"
+            "Нажмите ссылку ниже, чтобы российские приложения "
+            "(Сбер, ВБ, Озон, Яндекс и др.) работали корректно:\n"
+            f"<code>{STREISAND_ROUTE_URL}</code>\n"
+            "Скопируйте → откройте в Safari/Chrome → Streisand импортирует правила автоматически.\n"
+        )
 
     lines.append("Нажмите 📖 Инструкция для пошаговой настройки.")
     return "\n".join(lines)
 
 
 STREISAND_ROUTING_INSTRUCTION = """
-🔧 <b>Настройка маршрутизации (один раз):</b>
-Чтобы российские приложения (Сбер, Тинькофф, Wildberries, Яндекс и др.) работали корректно:
+🔧 <b>Шаг 2 — Маршрутизация (один раз):</b>
+Чтобы российские приложения (Сбер, Тинькофф, WB, Озон, Яндекс и др.) работали корректно:
 
-1. Откройте Streisand → Settings → Routing
-2. Нажмите Assets → Update All (подождите загрузку)
-3. Вернитесь в Routing → нажмите + (Add Rule)
-4. Добавьте правило:
-   • Outbound: <b>Direct</b>
-   • Domain: добавьте <code>geosite:category-ru</code>
-   • IP: добавьте <code>geoip:ru</code>
-5. Нажмите Save
-6. Включите переключатель <b>Routing</b> вверху
+Скопируйте ссылку маршрутизации из раздела "🔗 Моя ссылка" → откройте в Safari/Chrome → Streisand импортирует правила автоматически.
 
-✅ После этого банки, маркетплейсы и госуслуги будут работать напрямую."""
+Или вручную:
+1. Streisand → Settings → Routing → Assets → Update All
+2. Routing → + (Add Rule)
+3. Outbound: <b>Direct</b>  |  Domain: <code>geosite:category-ru</code>  |  IP: <code>geoip:ru</code>
+4. Save → включите Routing
+
+✅ Банки, маркетплейсы и госуслуги будут работать напрямую."""
 
 INSTRUCTIONS = {
     "iphone": """📱 <b>Установка на iPhone (Streisand)</b>

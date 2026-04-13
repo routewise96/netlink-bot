@@ -19,7 +19,7 @@ from bot.keyboards.admin_kb import (
     back_to_admin_kb,
 )
 from bot.keyboards.user_kb import main_menu_kb, agreement_start_kb
-from bot.config import ADMIN_CHAT_ID, SERVER_IP
+from bot.config import ADMIN_CHAT_ID, SERVER_IP, STREISAND_ROUTE_URL
 
 router = Router()
 
@@ -177,6 +177,7 @@ def _build_approval_text(devices_data: list[dict]) -> str:
         "При использовании на двух устройствах одновременно — ссылка блокируется автоматически.\n",
     ]
 
+    has_streisand = False
     for dd in devices_data:
         platform = dd["platform"]
         label = PLATFORM_LABELS.get(platform, f"📱 {platform}")
@@ -184,6 +185,16 @@ def _build_approval_text(devices_data: list[dict]) -> str:
             lines.append(f"{label}:\n<code>{dd['sub_url']}</code>\n")
         else:
             lines.append(f"{label}:\n<code>{dd['vless']}</code>\n")
+            if platform in ("iphone", "android"):
+                has_streisand = True
+
+    if has_streisand and STREISAND_ROUTE_URL:
+        lines.append(
+            "🔧 <b>Для iPhone/Android — настройте маршрутизацию (один раз):</b>\n"
+            "Скопируйте ссылку ниже → откройте в Safari/Chrome → "
+            "Streisand импортирует правила автоматически:\n"
+            f"<code>{STREISAND_ROUTE_URL}</code>\n"
+        )
 
     return "\n".join(lines)
 
