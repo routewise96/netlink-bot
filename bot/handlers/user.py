@@ -1,5 +1,6 @@
 """Approved user handlers: link, instruction, devices, questions."""
 import json
+import time
 
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
@@ -9,37 +10,57 @@ from aiogram.types import CallbackQuery, Message
 from bot.db import queries as db
 from bot.services import deepseek
 from bot.keyboards.user_kb import main_menu_kb, back_to_menu_kb, link_and_back_kb
-from bot.config import ADMIN_CHAT_ID
+from bot.config import ADMIN_CHAT_ID, SERVER_IP
 
 router = Router()
+
+# Rate limit: track last question timestamps per user
+_rate_limit: dict[int, list[float]] = {}
+RATE_LIMIT_MAX = 5
+RATE_LIMIT_WINDOW = 60
 
 
 class AskQuestion(StatesGroup):
     waiting_question = State()
 
 
+def _build_links_text(user: dict) -> str:
+    """Build the two-link message for a user."""
+    vless_link = user.get("vless_link", "")
+    sub_id = user.get("sub_id", "")
+    sub_url = f"http://{SERVER_IP}:8080/profiles/{sub_id}.json" if sub_id else ""
+
+    lines = ["🔗 <b>Ваши ссылки для подключения:</b>"]
+    if sub_url:
+        lines.append(f"\n📎 <b>Для macOS</b> (sing-box VT):\n<code>{sub_url}</code>")
+    if vless_link:
+        lines.append(f"\n📎 <b>Для iPhone / Android / Windows:</b>\n<code>{vless_link}</code>")
+    lines.append("\nНажмите 📖 Инструкция для пошаговой настройки.")
+    return "\n".join(lines)
+
+
 INSTRUCTIONS = {
     "iphone": """📱 <b>Установка на iPhone (Streisand)</b>
 
-1. Скачайте приложение <b>Streisand</b> из App Store
-2. Откройте приложение
+1. Откройте App Store → найдите "Streisand"
+2. Скачайте и откройте
 3. Нажмите "+" в правом верхнем углу
 4. Выберите "Импорт из буфера обмена"
-5. Скопируйте вашу ссылку (кнопка "🔗 Моя ссылка" выше)
-6. Вернитесь в Streisand — профиль импортируется автоматически
-7. Нажмите на переключатель вверху для подключения
+5. Скопируйте ссылку из раздела "Для iPhone / Android / Windows" выше
+6. Вернитесь в Streisand — профиль добавится автоматически
+7. Нажмите переключатель вверху для подключения
 
-✅ Готово! Интернет работает через защищённое соединение.""",
+✅ Готово!""",
 
     "android": """📱 <b>Установка на Android (Streisand)</b>
 
-1. Скачайте приложение <b>Streisand</b> из Google Play
-2. Откройте приложение
+1. Откройте Google Play → найдите "Streisand"
+2. Скачайте и откройте
 3. Нажмите "+" в правом верхнем углу
 4. Выберите "Импорт из буфера обмена"
-5. Скопируйте вашу ссылку (кнопка "🔗 Моя ссылка" выше)
-6. Вернитесь в Streisand — профиль импортируется автоматически
-7. Нажмите на переключатель вверху для подключения
+5. Скопируйте ссылку из раздела "Для iPhone / Android / Windows" выше
+6. Вернитесь в Streisand — профиль добавится автоматически
+7. Нажмите переключатель вверху для подключения
 
 ✅ Готово!""",
 
@@ -48,22 +69,25 @@ INSTRUCTIONS = {
 1. Скачайте Hiddify: https://hiddify.com
 2. Установите и запустите
 3. Нажмите "+" → "Добавить из буфера обмена"
-4. Скопируйте вашу ссылку (кнопка "🔗 Моя ссылка" выше)
+4. Скопируйте ссылку из раздела "Для iPhone / Android / Windows" выше
 5. Вставьте — профиль добавится
 6. Нажмите "Подключить"
 
-⚠️ В настройках Hiddify отключите "Блокировать рекламу" — иначе не будут работать сервисы Яндекса.
+⚠️ ВАЖНО: Зайдите в Настройки → отключите "Блокировать рекламу". Без этого не будут работать Яндекс Карты, Такси и другие сервисы Яндекса.
 
 ✅ Готово!""",
 
-    "macos": """🖥 <b>Установка на macOS (Streisand)</b>
+    "macos": """🖥 <b>Установка на macOS (sing-box VT)</b>
 
-1. Откройте App Store → найдите "Streisand"
-   (приложение для iPad, но работает на Mac с Apple Silicon)
+1. Откройте App Store → найдите "sing-box VT"
 2. Скачайте и откройте
-3. Нажмите "+" → "Импорт из буфера обмена"
-4. Скопируйте вашу ссылку (кнопка "🔗 Моя ссылка" выше)
-5. Профиль импортируется → включите переключатель
+3. Перейдите в Profiles → New Profile
+4. Type: выберите Remote
+5. Name: NetLink
+6. URL: вставьте ссылку из раздела "Для macOS" выше
+7. Нажмите Create
+8. Перейдите в Dashboard → выберите профиль → нажмите ▶
+9. Разрешите добавление VPN-конфигурации если попросит
 
 ✅ Готово!""",
 }
@@ -88,9 +112,7 @@ async def show_link(callback: CallbackQuery):
         return
 
     await callback.message.edit_text(
-        f"🔗 <b>Ваша персональная ссылка:</b>\n\n"
-        f"<code>{user['vless_link']}</code>\n\n"
-        f"Нажмите на ссылку чтобы скопировать.",
+        _build_links_text(user),
         reply_markup=link_and_back_kb(),
         parse_mode="HTML",
     )
@@ -113,7 +135,7 @@ async def show_instruction(callback: CallbackQuery):
     if not texts:
         texts.append("Инструкции для ваших платформ не найдены.")
 
-    full_text = "\n\n" + "═" * 30 + "\n\n".join(texts)
+    full_text = "\n\n".join(texts)
     if len(full_text) > 4000:
         for text in texts:
             await callback.message.answer(text, parse_mode="HTML")
@@ -123,7 +145,7 @@ async def show_instruction(callback: CallbackQuery):
         )
     else:
         await callback.message.edit_text(
-            "\n\n".join(texts),
+            full_text,
             reply_markup=back_to_menu_kb(),
             parse_mode="HTML",
         )
@@ -162,7 +184,7 @@ async def start_question(callback: CallbackQuery, state: FSMContext):
         return
 
     await callback.message.edit_text(
-        "💬 Задайте ваш вопрос о работе сервиса. Я постараюсь помочь!",
+        "💬 Задайте ваш вопрос о работе сервиса.",
         reply_markup=back_to_menu_kb(),
         parse_mode="HTML",
     )
@@ -172,14 +194,29 @@ async def start_question(callback: CallbackQuery, state: FSMContext):
 
 @router.message(AskQuestion.waiting_question)
 async def process_question(message: Message, state: FSMContext):
-    question = message.text.strip()
-    if not question:
+    question = message.text
+    if not question or not question.strip():
         return
 
+    question = question.strip()
     user = await db.get_user(message.from_user.id)
     if not user or user["status"] != "approved":
         await state.clear()
         return
+
+    # Rate limit
+    uid = message.from_user.id
+    now = time.time()
+    timestamps = _rate_limit.get(uid, [])
+    timestamps = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
+    if len(timestamps) >= RATE_LIMIT_MAX:
+        await message.answer(
+            "⏳ Слишком много вопросов. Подождите минуту.",
+            reply_markup=back_to_menu_kb(),
+        )
+        return
+    timestamps.append(now)
+    _rate_limit[uid] = timestamps
 
     ai_response = await deepseek.ask(question)
 
@@ -188,7 +225,6 @@ async def process_question(message: Message, state: FSMContext):
         await message.answer(
             ai_response + "\n\nЗадайте ещё вопрос или вернитесь в меню.",
             reply_markup=back_to_menu_kb(),
-            parse_mode="HTML",
         )
     else:
         # Escalate to admin

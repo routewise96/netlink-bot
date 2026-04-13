@@ -18,7 +18,7 @@ from bot.keyboards.admin_kb import (
     back_to_admin_kb,
 )
 from bot.keyboards.user_kb import main_menu_kb, agreement_start_kb
-from bot.config import ADMIN_CHAT_ID
+from bot.config import ADMIN_CHAT_ID, SERVER_IP
 
 router = Router()
 
@@ -223,6 +223,15 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
         request_id, status="approved", resolved_at=now
     )
 
+    # Build dual-link text
+    sub_url = f"http://{SERVER_IP}:8080/profiles/{sub_id}.json" if sub_id else ""
+    links_lines = []
+    if sub_url:
+        links_lines.append(f"📎 <b>Для macOS</b> (sing-box VT):\n<code>{sub_url}</code>")
+    if vless_link:
+        links_lines.append(f"📎 <b>Для iPhone / Android / Windows:</b>\n<code>{vless_link}</code>")
+    links_text = "\n\n".join(links_lines)
+
     if is_test:
         # Test mode: show result to admin directly with exit button
         await callback.message.edit_text(
@@ -232,9 +241,9 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
         await callback.bot.send_message(
             telegram_id,
             f"🧪 <b>Тест: Доступ одобрен!</b>\n\n"
-            f"🔗 Ваша персональная ссылка:\n"
-            f"<code>{vless_link}</code>\n\n"
-            f"Это тестовая ссылка. Нажмите кнопку ниже для просмотра инструкций,\n"
+            f"🔗 <b>Ваши ссылки для подключения:</b>\n\n"
+            f"{links_text}\n\n"
+            f"Это тестовые ссылки. Нажмите кнопку ниже для просмотра инструкций,\n"
             f"или выйдите из тест-режима.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📖 Инструкция", callback_data="instruction")],
@@ -248,9 +257,9 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
         await callback.bot.send_message(
             telegram_id,
             f"✅ <b>Доступ одобрен!</b>\n\n"
-            f"🔗 Ваша персональная ссылка:\n"
-            f"<code>{vless_link}</code>\n\n"
-            f"Нажмите на ссылку чтобы скопировать, затем следуйте инструкции.",
+            f"🔗 <b>Ваши ссылки для подключения:</b>\n\n"
+            f"{links_text}\n\n"
+            f"Нажмите на ссылку чтобы скопировать, затем следуйте 📖 Инструкции.",
             reply_markup=main_menu_kb(),
             parse_mode="HTML",
         )
@@ -403,8 +412,15 @@ async def show_user_link(callback: CallbackQuery):
         await callback.answer("Ссылка не найдена", show_alert=True)
         return
 
+    sub_id = user.get("sub_id", "")
+    sub_url = f"http://{SERVER_IP}:8080/profiles/{sub_id}.json" if sub_id else ""
+    lines = [f"🔗 <b>Ссылки {user['fio']}:</b>"]
+    if sub_url:
+        lines.append(f"\n📎 macOS: <code>{sub_url}</code>")
+    lines.append(f"\n📎 VLESS: <code>{user['vless_link']}</code>")
+
     await callback.message.answer(
-        f"🔗 Ссылка {user['fio']}:\n\n<code>{user['vless_link']}</code>",
+        "\n".join(lines),
         parse_mode="HTML",
     )
     await callback.answer()
