@@ -50,6 +50,19 @@ class Registration(StatesGroup):
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     telegram_id = message.from_user.id
+
+    # Admin gets admin panel directly, no registration needed
+    if telegram_id == ADMIN_CHAT_ID:
+        from bot.db.queries import get_stats
+        stats = await get_stats()
+        from bot.keyboards.admin_kb import admin_panel_kb
+        await message.answer(
+            "🔧 <b>Админ-панель NetLink</b>",
+            reply_markup=admin_panel_kb(stats["pending"]),
+            parse_mode="HTML",
+        )
+        return
+
     user = await db.get_user(telegram_id)
 
     if user and user["status"] == "approved":
@@ -70,7 +83,7 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer("🚫 Ваш доступ заблокирован. Обратитесь к администратору.")
         return
 
-    await db.create_user(telegram_id, message.from_user.username)
+    # No DB record created here — only show agreement. Record created on acceptance.
     await message.answer(
         "🔒 <b>NetLink</b> — корпоративный сервис защищённого доступа.\n\n"
         "Для получения доступа необходимо принять условия использования.",
@@ -93,6 +106,8 @@ async def show_agreement(callback: CallbackQuery):
 async def accept_agreement(callback: CallbackQuery, state: FSMContext):
     telegram_id = callback.from_user.id
     now = datetime.now().isoformat()
+    # Create user record only now — on agreement acceptance
+    await db.create_user(telegram_id, callback.from_user.username)
     await db.update_user(telegram_id, agreement_accepted_at=now)
     await callback.message.edit_text("✅ Условия приняты.\n\nВведите ваше ФИО (полностью):")
     await state.set_state(Registration.waiting_fio)
