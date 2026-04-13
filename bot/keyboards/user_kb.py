@@ -14,21 +14,13 @@ def agreement_accept_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def devices_count_kb() -> InlineKeyboardMarkup:
-    buttons = [
-        InlineKeyboardButton(text=f"📱 {n}", callback_data=f"devices_{n}")
-        for n in range(1, 4)
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=[buttons])
-
-
 def platforms_kb(selected: set[str] | None = None) -> InlineKeyboardMarkup:
     selected = selected or set()
     platforms = [
-        ("iPhone", "iphone"),
-        ("Android", "android"),
-        ("Windows", "windows"),
-        ("macOS", "macos"),
+        ("📱 iPhone", "iphone"),
+        ("📱 Android", "android"),
+        ("💻 Windows", "windows"),
+        ("🖥 macOS", "macos"),
     ]
     rows = []
     for label, key in platforms:

@@ -1,4 +1,4 @@
-"""Registration flow: /start → agreement → FIO → devices → platforms → request."""
+"""Registration flow: /start → agreement → FIO → platforms → request."""
 import json
 from datetime import datetime
 
@@ -12,7 +12,6 @@ from bot.db import queries as db
 from bot.keyboards.user_kb import (
     agreement_start_kb,
     agreement_accept_kb,
-    devices_count_kb,
     platforms_kb,
     main_menu_kb,
 )
@@ -20,6 +19,9 @@ from bot.keyboards.admin_kb import approve_reject_kb
 from bot.config import ADMIN_CHAT_ID
 
 router = Router()
+
+PLATFORM_NAMES = {"iphone": "iPhone", "android": "Android", "windows": "Windows", "macos": "macOS"}
+MAX_DEVICES = 3
 
 AGREEMENT_TEXT = """📜 <b>УСЛОВИЯ ИСПОЛЬЗОВАНИЯ СЕРВИСА NETLINK</b>
 
@@ -35,7 +37,7 @@ AGREEMENT_TEXT = """📜 <b>УСЛОВИЯ ИСПОЛЬЗОВАНИЯ СЕРВИ
 
 4. Сервис ведёт техническую статистику подключений для обеспечения стабильной работы и безопасности.
 
-5. Администратор вправе заблокировать доступ без предварительного уведомления в случае нарушения настоящих условий.
+5. В случае нарушения условий использования доступ к сервису может быть ограничен.
 
 6. Пользователь несёт персональную ответственность за все действия, совершённые через предоставленный доступ.
 
@@ -44,7 +46,6 @@ AGREEMENT_TEXT = """📜 <b>УСЛОВИЯ ИСПОЛЬЗОВАНИЯ СЕРВИ
 
 class Registration(StatesGroup):
     waiting_fio = State()
-    waiting_devices = State()
     waiting_platforms = State()
 
 
@@ -52,12 +53,10 @@ class Registration(StatesGroup):
 async def cmd_start(message: Message, state: FSMContext):
     telegram_id = message.from_user.id
 
-    # Check if admin is in test mode — if so, don't clear state, let flow continue
     data = await state.get_data()
     if not data.get("test_mode"):
         await state.clear()
 
-        # Admin gets admin panel directly, no registration needed
         if telegram_id == ADMIN_CHAT_ID:
             from bot.db.queries import get_stats
             stats = await get_stats()
@@ -89,7 +88,6 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer("🚫 Ваш доступ заблокирован. Обратитесь к администратору.")
         return
 
-    # No DB record created here — only show agreement. Record created on acceptance.
     await message.answer(
         "🔒 <b>NetLink</b> — корпоративный сервис защищённого доступа.\n\n"
         "Для получения доступа необходимо принять условия использования.",
@@ -112,7 +110,6 @@ async def show_agreement(callback: CallbackQuery):
 async def accept_agreement(callback: CallbackQuery, state: FSMContext):
     telegram_id = callback.from_user.id
     now = datetime.now().isoformat()
-    # Create user record only now — on agreement acceptance
     await db.create_user(telegram_id, callback.from_user.username)
     await db.update_user(telegram_id, agreement_accepted_at=now)
     await callback.message.edit_text("✅ Условия приняты.\n\nВведите ваше ФИО (полностью):")
@@ -135,25 +132,14 @@ async def process_fio(message: Message, state: FSMContext):
     if len(fio) < 3 or len(fio.split()) < 2:
         await message.answer("Пожалуйста, введите полное ФИО (минимум имя и фамилия):")
         return
-    await state.update_data(fio=fio)
+    await state.update_data(fio=fio, selected_platforms=set())
     await db.update_user(message.from_user.id, fio=fio)
     await message.answer(
-        "📱 Сколько устройств будете использовать?",
-        reply_markup=devices_count_kb(),
-    )
-    await state.set_state(Registration.waiting_devices)
-
-
-@router.callback_query(F.data.startswith("devices_"), Registration.waiting_devices)
-async def process_devices(callback: CallbackQuery, state: FSMContext):
-    count = int(callback.data.split("_")[1])
-    await state.update_data(devices_count=count, selected_platforms=set())
-    await callback.message.edit_text(
-        "💻 На каких устройствах будете использовать?\n(выберите все подходящие, затем нажмите «Готово»)",
+        "📱 На каких устройствах будете использовать?\n"
+        "(выберите все нужные, затем нажмите «Готово»)",
         reply_markup=platforms_kb(),
     )
     await state.set_state(Registration.waiting_platforms)
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("platform_"), Registration.waiting_platforms)
@@ -161,10 +147,18 @@ async def toggle_platform(callback: CallbackQuery, state: FSMContext):
     platform = callback.data.split("_", 1)[1]
     data = await state.get_data()
     selected = data.get("selected_platforms", set())
+
     if platform in selected:
         selected.discard(platform)
     else:
+        if len(selected) >= MAX_DEVICES:
+            await callback.answer(
+                f"⚠️ Максимум {MAX_DEVICES} устройства. Уберите одно.",
+                show_alert=True,
+            )
+            return
         selected.add(platform)
+
     await state.update_data(selected_platforms=selected)
     await callback.message.edit_reply_markup(reply_markup=platforms_kb(selected))
     await callback.answer()
@@ -179,8 +173,8 @@ async def platforms_done(callback: CallbackQuery, state: FSMContext):
         return
 
     fio = data["fio"]
-    devices_count = data["devices_count"]
     platforms_list = sorted(selected)
+    devices_count = len(platforms_list)
     platforms_json = json.dumps(platforms_list)
 
     telegram_id = callback.from_user.id
@@ -196,8 +190,7 @@ async def platforms_done(callback: CallbackQuery, state: FSMContext):
         telegram_id, fio, devices_count, platforms_json
     )
 
-    platform_names = {"iphone": "iPhone", "android": "Android", "windows": "Windows", "macos": "macOS"}
-    platforms_str = ", ".join(platform_names.get(p, p) for p in platforms_list)
+    platforms_str = ", ".join(PLATFORM_NAMES.get(p, p) for p in platforms_list)
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     username_str = f"@{username}" if username else "нет username"
 
@@ -205,8 +198,8 @@ async def platforms_done(callback: CallbackQuery, state: FSMContext):
         f"📋 <b>Новая заявка #{request_id}</b>\n\n"
         f"👤 ФИО: {fio}\n"
         f"📱 Telegram: {username_str} (ID: {telegram_id})\n"
-        f"📊 Устройств: {devices_count}\n"
-        f"💻 Платформы: {platforms_str}\n"
+        f"💻 Платформы: {platforms_str} ({devices_count} "
+        f"{'устройство' if devices_count == 1 else 'устройства'})\n"
         f"🕐 Дата: {now}"
     )
 

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS user_devices (
     email TEXT NOT NULL,
     sub_id TEXT NOT NULL,
     vless_link TEXT,
+    platform TEXT,
     subscription_url TEXT,
     status TEXT DEFAULT 'active',
     banned_at TEXT,

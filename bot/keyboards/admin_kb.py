@@ -27,27 +27,24 @@ def admin_panel_kb(pending_count: int = 0) -> InlineKeyboardMarkup:
     ])
 
 
+PLATFORM_SHORT = {"iphone": "iPhone", "android": "Android", "windows": "Windows", "macos": "macOS"}
+
+
 def user_detail_kb(telegram_id: int, devices: list[dict] | None = None) -> InlineKeyboardMarkup:
     """Build per-device ban/unban buttons + block-all + back."""
     rows = []
     if devices:
-        ban_row = []
-        unban_row = []
         for d in devices:
             did = d["id"]
-            num = d["device_number"]
+            plat = PLATFORM_SHORT.get(d.get("platform", ""), f"#{d['device_number']}")
             if d["status"] == "active":
-                ban_row.append(InlineKeyboardButton(
-                    text=f"🔴 Бан #{num}", callback_data=f"bandev_{did}",
-                ))
+                rows.append([InlineKeyboardButton(
+                    text=f"🔴 Бан {plat}", callback_data=f"bandev_{did}",
+                )])
             else:
-                unban_row.append(InlineKeyboardButton(
-                    text=f"🟢 Разбан #{num}", callback_data=f"unbandev_{did}",
-                ))
-        if ban_row:
-            rows.append(ban_row)
-        if unban_row:
-            rows.append(unban_row)
+                rows.append([InlineKeyboardButton(
+                    text=f"🟢 Разбан {plat}", callback_data=f"unbandev_{did}",
+                )])
     rows.append([InlineKeyboardButton(text="🔴 Заблокировать всё", callback_data=f"block_{telegram_id}")])
     rows.append([InlineKeyboardButton(text="🔗 Его ссылки", callback_data=f"userlink_{telegram_id}")])
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")])

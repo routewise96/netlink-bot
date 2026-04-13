@@ -1,4 +1,4 @@
-"""Admin panel: approve/reject requests, manage users, per-device ban/unban, stats."""
+"""Admin panel: approve/reject, per-device management, stats."""
 import json
 import subprocess
 from datetime import datetime
@@ -16,7 +16,6 @@ from bot.keyboards.admin_kb import (
     admin_panel_kb,
     approve_reject_kb,
     user_detail_kb,
-    unblock_kb,
     back_to_admin_kb,
 )
 from bot.keyboards.user_kb import main_menu_kb, agreement_start_kb
@@ -24,12 +23,20 @@ from bot.config import ADMIN_CHAT_ID, SERVER_IP
 
 router = Router()
 
+PLATFORM_LABELS = {
+    "iphone": "📱 iPhone (Streisand)",
+    "android": "📱 Android (Streisand)",
+    "windows": "💻 Windows (Hiddify)",
+    "macos": "🖥 macOS (sing-box VT)",
+}
+PLATFORM_NAMES = {"iphone": "iPhone", "android": "Android", "windows": "Windows", "macos": "macOS"}
+
 
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_CHAT_ID
 
 
-# ── Admin entry points ──
+# ── Admin entry ──
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
@@ -112,7 +119,6 @@ async def exit_test_mode(callback: CallbackQuery, state: FSMContext):
 
 
 async def _cleanup_test_data(telegram_id: int):
-    """Remove admin's test user/request/device records from bot DB."""
     from bot.db.models import get_db
     async with get_db() as conn:
         await conn.execute(
@@ -142,13 +148,13 @@ async def admin_requests(callback: CallbackQuery):
 
     for req in requests[:10]:
         platforms = json.loads(req["platforms"] or "[]")
-        platform_names = {"iphone": "iPhone", "android": "Android", "windows": "Windows", "macos": "macOS"}
-        platforms_str = ", ".join(platform_names.get(p, p) for p in platforms)
+        platforms_str = ", ".join(PLATFORM_NAMES.get(p, p) for p in platforms)
+        n = len(platforms)
+        dev_word = "устройство" if n == 1 else "устройства"
         text = (
             f"📋 <b>Заявка #{req['id']}</b>\n\n"
             f"👤 ФИО: {req['fio']}\n"
-            f"📊 Устройств: {req['devices_count']}\n"
-            f"💻 Платформы: {platforms_str}\n"
+            f"💻 Платформы: {platforms_str} ({n} {dev_word})\n"
             f"🕐 {req['created_at']}"
         )
         await callback.message.answer(
@@ -159,7 +165,28 @@ async def admin_requests(callback: CallbackQuery):
     await callback.answer()
 
 
-# ── Approve: N UUIDs, each limitIp=1 ──
+# ── Approve: per-platform UUID assignment ──
+
+def _build_approval_text(devices_data: list[dict]) -> str:
+    """Build per-platform links text for approval message."""
+    n = len(devices_data)
+    dev_word = "устройство" if n == 1 else "устройства"
+    lines = [
+        f"✅ <b>Доступ одобрен!</b> Вам выданы ссылки на {n} {dev_word}.\n",
+        "⚠️ Каждая ссылка работает строго на <b>ОДНОМ</b> устройстве. "
+        "При использовании на двух устройствах одновременно — ссылка блокируется автоматически.\n",
+    ]
+
+    for dd in devices_data:
+        platform = dd["platform"]
+        label = PLATFORM_LABELS.get(platform, f"📱 {platform}")
+        if platform == "macos":
+            lines.append(f"{label}:\n<code>{dd['sub_url']}</code>\n")
+        else:
+            lines.append(f"{label}:\n<code>{dd['vless']}</code>\n")
+
+    return "\n".join(lines)
+
 
 @router.callback_query(F.data.startswith("approve_"))
 async def approve_request(callback: CallbackQuery, state: FSMContext):
@@ -178,21 +205,18 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Пользователь не найден", show_alert=True)
         return
 
-    devices_count = req["devices_count"]
+    platforms = json.loads(req["platforms"] or "[]")
+    devices_count = len(platforms)
 
-    # Check test mode
     is_test = telegram_id == ADMIN_CHAT_ID
     fsm_data = await state.get_data()
     is_test = is_test and fsm_data.get("test_mode", False)
 
-    # Get used emails from user_devices + legacy users table
     used_emails = await db.get_all_used_emails()
-
-    # Need N free UUIDs
     free = get_free_uuids(used_emails)
     if len(free) < devices_count:
         await callback.answer(
-            f"Недостаточно свободных UUID! Нужно {devices_count}, доступно {len(free)}",
+            f"Недостаточно UUID! Нужно {devices_count}, доступно {len(free)}",
             show_alert=True,
         )
         return
@@ -201,14 +225,12 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
     emails_to_update = [c["email"] for c in assigned]
 
     if not is_test:
-        # Set limitIp=1 for each assigned UUID in x-ui DB
         update_clients_limit_ip(emails_to_update, 1)
         try:
             subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
         except Exception:
             pass
 
-    # Update user status
     now = datetime.now().isoformat()
     first = assigned[0]
     await db.update_user(
@@ -216,20 +238,20 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
         uuid=first["id"],
         email=first["email"],
         sub_id=first["subId"],
-        vless_link=generate_vless_link(first["id"], "NetLink-1"),
+        vless_link=generate_vless_link(first["id"], f"NetLink-{PLATFORM_NAMES.get(platforms[0], '1')}"),
         status="approved",
         approved_at=now,
         devices_count=devices_count,
     )
     await db.update_request(request_id, status="approved", resolved_at=now)
 
-    # Create user_devices records
     user_row = await db.get_user(telegram_id)
     user_id = user_row["id"]
 
-    device_records = []
-    for i, client in enumerate(assigned, 1):
-        vless = generate_vless_link(client["id"], f"NetLink-{i}")
+    devices_data = []
+    for i, (client, platform) in enumerate(zip(assigned, platforms), 1):
+        plat_name = PLATFORM_NAMES.get(platform, str(i))
+        vless = generate_vless_link(client["id"], f"NetLink-{plat_name}")
         sub_url = f"http://{SERVER_IP}:8080/profiles/{client['subId']}.json"
         await db.create_user_device(
             user_id=user_id,
@@ -239,28 +261,14 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
             sub_id=client["subId"],
             vless_link=vless,
             subscription_url=sub_url,
+            platform=platform,
         )
-        device_records.append({
-            "num": i, "email": client["email"],
+        devices_data.append({
+            "platform": platform, "email": client["email"],
             "vless": vless, "sub_url": sub_url,
         })
 
-    # Build message for user
-    user_lines = [
-        f"✅ <b>Доступ одобрен!</b> Вам выданы ссылки на {devices_count} "
-        f"{'устройство' if devices_count == 1 else 'устройства'}.\n",
-        "⚠️ Каждая ссылка работает строго на <b>ОДНОМ</b> устройстве. "
-        "При использовании на двух устройствах одновременно — ссылка блокируется автоматически.\n",
-    ]
-    for dr in device_records:
-        user_lines.append(f"📱 <b>Устройство {dr['num']}:</b>\n<code>{dr['vless']}</code>")
-
-    # macOS subscription lines
-    user_lines.append(f"\n🖥 <b>Для macOS</b> (sing-box VT):")
-    for dr in device_records:
-        user_lines.append(f"Устройство {dr['num']}: <code>{dr['sub_url']}</code>")
-
-    user_text = "\n".join(user_lines)
+    user_text = _build_approval_text(devices_data)
     emails_str = ", ".join(emails_to_update)
 
     if is_test:
@@ -357,7 +365,7 @@ async def admin_users(callback: CallbackQuery):
         return
 
     text = "👥 <b>Активные пользователи:</b>\n\n"
-    for i, u in enumerate(users[:20]):
+    for u in users[:20]:
         devices = await db.get_user_devices(u["telegram_id"])
         active_d = sum(1 for d in devices if d["status"] == "active")
         total_d = len(devices)
@@ -365,7 +373,6 @@ async def admin_users(callback: CallbackQuery):
     if len(users) > 20:
         text += f"\n...и ещё {len(users) - 20}"
 
-    # Build user selection buttons
     rows = []
     for u in users[:20]:
         rows.append([InlineKeyboardButton(
@@ -382,7 +389,7 @@ async def admin_users(callback: CallbackQuery):
     await callback.answer()
 
 
-# ── User detail with per-device info ──
+# ── User detail ──
 
 @router.callback_query(F.data.startswith("userdetail_"))
 async def user_detail(callback: CallbackQuery):
@@ -398,15 +405,16 @@ async def user_detail(callback: CallbackQuery):
     devices = await db.get_user_devices(telegram_id)
 
     text = f"👤 <b>{user['fio']}</b>\n"
-    text += f"📱 Telegram: {user.get('username', '') or user['telegram_id']}\n"
+    text += f"📱 Telegram: {user.get('username') or user['telegram_id']}\n"
     text += f"📅 Доступ с: {(user['approved_at'] or '')[:10]}\n\n"
 
     for d in devices:
-        num = d["device_number"]
+        platform = d.get("platform", "")
+        plat_label = PLATFORM_NAMES.get(platform, f"#{d['device_number']}")
         if d["status"] == "active":
-            text += f"📱 Устройство {num}: {d['email']} ✅ активно\n"
+            text += f"📱 {plat_label}: {d['email']} ✅ активно\n"
         else:
-            text += f"📱 Устройство {num}: {d['email']} 🔴 забанено\n"
+            text += f"📱 {plat_label}: {d['email']} 🔴 забанено\n"
 
     await callback.message.edit_text(
         text,
@@ -430,15 +438,12 @@ async def ban_device(callback: CallbackQuery):
         return
 
     await db.ban_device(device_id)
-
-    # Disable in x-ui: set limitIp=0
     update_clients_limit_ip([device["email"]], 0)
     try:
         subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
     except Exception:
         pass
 
-    # Find the user's telegram_id to refresh detail view
     from bot.db.models import get_db
     async with get_db() as conn:
         conn.row_factory = lambda c, r: dict(zip([d[0] for d in c.description], r))
@@ -449,7 +454,6 @@ async def ban_device(callback: CallbackQuery):
         row = await cur.fetchone()
 
     if row:
-        # Re-render detail
         callback.data = f"userdetail_{row['telegram_id']}"
         await user_detail(callback)
     else:
@@ -468,8 +472,6 @@ async def unban_device(callback: CallbackQuery):
         return
 
     await db.unban_device(device_id)
-
-    # Re-enable in x-ui: set limitIp=1
     update_clients_limit_ip([device["email"]], 1)
     try:
         subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
@@ -503,7 +505,6 @@ async def block_user(callback: CallbackQuery):
     now = datetime.now().isoformat()
     await db.update_user(telegram_id, status="blocked", blocked_at=now)
 
-    # Ban all devices
     devices = await db.get_user_devices(telegram_id)
     await db.ban_all_devices(telegram_id)
     emails = [d["email"] for d in devices if d["status"] == "active"]
@@ -539,7 +540,6 @@ async def unblock_user(callback: CallbackQuery):
     telegram_id = int(callback.data.split("_")[1])
     await db.update_user(telegram_id, status="approved", blocked_at=None)
 
-    # Unban all devices
     devices = await db.get_user_devices(telegram_id)
     for d in devices:
         if d["status"] == "banned":
@@ -590,21 +590,20 @@ async def show_user_link(callback: CallbackQuery):
 
     lines = [f"🔗 <b>Ссылки {user['fio']}:</b>\n"]
     for d in devices:
-        num = d["device_number"]
+        platform = d.get("platform", "")
+        label = PLATFORM_LABELS.get(platform, f"Устройство {d['device_number']}")
         status = "✅" if d["status"] == "active" else "🔴"
-        lines.append(f"📱 Устройство {num} {status} ({d['email']}):")
+        lines.append(f"{label} {status} ({d['email']}):")
         if d["status"] == "active":
-            lines.append(f"<code>{d['vless_link']}</code>")
-            if d.get("subscription_url"):
-                lines.append(f"macOS: <code>{d['subscription_url']}</code>")
+            if platform == "macos":
+                lines.append(f"<code>{d.get('subscription_url', '')}</code>")
+            else:
+                lines.append(f"<code>{d.get('vless_link', '')}</code>")
         else:
             lines.append("(заблокировано)")
         lines.append("")
 
-    await callback.message.answer(
-        "\n".join(lines),
-        parse_mode="HTML",
-    )
+    await callback.message.answer("\n".join(lines), parse_mode="HTML")
     await callback.answer()
 
 
@@ -653,7 +652,6 @@ async def admin_stats(callback: CallbackQuery):
         return
 
     stats = await db.get_stats()
-
     used_emails = await db.get_all_used_emails()
     free_uuids = len(get_free_uuids(used_emails))
 

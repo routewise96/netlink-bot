@@ -14,10 +14,16 @@ from bot.config import ADMIN_CHAT_ID, SERVER_IP
 
 router = Router()
 
-# Rate limit: track last question timestamps per user
 _rate_limit: dict[int, list[float]] = {}
 RATE_LIMIT_MAX = 5
 RATE_LIMIT_WINDOW = 60
+
+PLATFORM_LABELS = {
+    "iphone": "📱 iPhone (Streisand)",
+    "android": "📱 Android (Streisand)",
+    "windows": "💻 Windows (Hiddify)",
+    "macos": "🖥 macOS (sing-box VT)",
+}
 
 
 class AskQuestion(StatesGroup):
@@ -25,32 +31,29 @@ class AskQuestion(StatesGroup):
 
 
 def _build_devices_text(devices: list[dict]) -> str:
-    """Build per-device links message."""
+    """Build per-device links message with platform labels."""
     lines = ["🔗 <b>Ваши ссылки для подключения:</b>\n"]
     lines.append(
         "⚠️ Каждая ссылка работает строго на <b>ОДНОМ</b> устройстве. "
         "При использовании на двух устройствах одновременно — ссылка блокируется автоматически.\n"
     )
 
-    vless_lines = []
-    sub_lines = []
-
     for d in devices:
-        num = d["device_number"]
-        if d["status"] == "active":
-            vless_lines.append(f"📱 Устройство {num}:\n<code>{d['vless_link']}</code>")
-            if d.get("subscription_url"):
-                sub_lines.append(f"Устройство {num}: <code>{d['subscription_url']}</code>")
+        platform = d.get("platform", "")
+        label = PLATFORM_LABELS.get(platform, f"📱 Устройство {d['device_number']}")
+
+        if d["status"] != "active":
+            lines.append(f"{label}: 🔴 заблокировано\n")
+            continue
+
+        if platform == "macos":
+            # macOS gets subscription URL only
+            lines.append(f"{label}:\n<code>{d.get('subscription_url', '')}</code>\n")
         else:
-            vless_lines.append(f"📱 Устройство {num}: 🔴 заблокировано")
+            # All others get vless:// only
+            lines.append(f"{label}:\n<code>{d.get('vless_link', '')}</code>\n")
 
-    lines.extend(vless_lines)
-
-    if sub_lines:
-        lines.append(f"\n🖥 <b>Для macOS</b> (sing-box VT):")
-        lines.extend(sub_lines)
-
-    lines.append("\nНажмите 📖 Инструкция для пошаговой настройки.")
+    lines.append("Нажмите 📖 Инструкция для пошаговой настройки.")
     return "\n".join(lines)
 
 
@@ -146,11 +149,19 @@ async def show_instruction(callback: CallbackQuery):
         await callback.answer("Доступ не активен", show_alert=True)
         return
 
-    platforms = json.loads(user["platforms"] or "[]")
+    # Get platforms from user_devices (authoritative) or fallback to users.platforms
+    devices = await db.get_user_devices(callback.from_user.id)
+    if devices:
+        platforms = [d["platform"] for d in devices if d.get("platform")]
+    else:
+        platforms = json.loads(user["platforms"] or "[]")
+
     texts = []
+    seen = set()
     for p in platforms:
-        if p in INSTRUCTIONS:
+        if p in INSTRUCTIONS and p not in seen:
             texts.append(INSTRUCTIONS[p])
+            seen.add(p)
 
     if not texts:
         texts.append("Инструкции для ваших платформ не найдены.")
@@ -160,10 +171,7 @@ async def show_instruction(callback: CallbackQuery):
         for text in texts:
             await callback.message.answer(text, parse_mode="HTML")
     else:
-        await callback.message.answer(
-            full_text,
-            parse_mode="HTML",
-        )
+        await callback.message.answer(full_text, parse_mode="HTML")
     await callback.message.answer(
         "Выберите действие:",
         reply_markup=main_menu_kb(),
@@ -179,25 +187,25 @@ async def show_devices(callback: CallbackQuery):
         return
 
     devices = await db.get_user_devices(callback.from_user.id)
-    platforms = json.loads(user["platforms"] or "[]")
-    platform_names = {"iphone": "iPhone", "android": "Android", "windows": "Windows", "macos": "macOS"}
-    platforms_str = ", ".join(platform_names.get(p, p) for p in platforms)
     approved_date = (user["approved_at"] or "")[:10]
 
     lines = [
         f"📊 <b>Ваш профиль</b>\n",
         f"👤 {user['fio']}",
-        f"💻 Платформы: {platforms_str}",
         f"📅 Доступ с: {approved_date}\n",
     ]
 
-    active = sum(1 for d in devices if d["status"] == "active")
-    banned = sum(1 for d in devices if d["status"] == "banned")
+    active = 0
+    banned = 0
     for d in devices:
-        num = d["device_number"]
-        status_icon = "✅" if d["status"] == "active" else "🔴"
-        status_text = "активно" if d["status"] == "active" else "заблокировано"
-        lines.append(f"📱 Устройство {num}: {status_icon} {status_text}")
+        platform = d.get("platform", "")
+        label = PLATFORM_LABELS.get(platform, f"Устройство {d['device_number']}")
+        if d["status"] == "active":
+            lines.append(f"{label}: ✅ активно")
+            active += 1
+        else:
+            lines.append(f"{label}: 🔴 заблокировано")
+            banned += 1
 
     lines.append(f"\n📱 Активных: {active}" + (f" | 🔴 Забанено: {banned}" if banned else ""))
 
@@ -237,7 +245,6 @@ async def process_question(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # Rate limit
     uid = message.from_user.id
     now = time.time()
     timestamps = _rate_limit.get(uid, [])
@@ -260,7 +267,6 @@ async def process_question(message: Message, state: FSMContext):
             reply_markup=back_to_menu_kb(),
         )
     else:
-        # Escalate to admin
         await db.save_ai_conversation(message.from_user.id, question, "", escalated=True)
         username = message.from_user.username
         username_str = f"@{username}" if username else str(message.from_user.id)

@@ -110,13 +110,14 @@ async def get_users_by_status(status: str) -> list[dict]:
 async def create_user_device(
     user_id: int, device_number: int, uuid: str, email: str,
     sub_id: str, vless_link: str, subscription_url: str,
+    platform: str = "",
 ) -> int:
     async with get_db() as db:
         cursor = await db.execute(
             """INSERT INTO user_devices
-               (user_id, device_number, uuid, email, sub_id, vless_link, subscription_url)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, device_number, uuid, email, sub_id, vless_link, subscription_url),
+               (user_id, device_number, uuid, email, sub_id, vless_link, subscription_url, platform)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, device_number, uuid, email, sub_id, vless_link, subscription_url, platform),
         )
         await db.commit()
         return cursor.lastrowid
