@@ -96,7 +96,7 @@ INSTRUCTIONS = {
 @router.callback_query(F.data == "back_menu")
 async def back_to_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(
+    await callback.message.answer(
         "🔒 <b>NetLink</b> — защищённый доступ\n\nВыберите действие:",
         reply_markup=main_menu_kb(),
         parse_mode="HTML",
@@ -111,7 +111,7 @@ async def show_link(callback: CallbackQuery):
         await callback.answer("Доступ не активен", show_alert=True)
         return
 
-    await callback.message.edit_text(
+    await callback.message.answer(
         _build_links_text(user),
         reply_markup=link_and_back_kb(),
         parse_mode="HTML",
@@ -139,16 +139,15 @@ async def show_instruction(callback: CallbackQuery):
     if len(full_text) > 4000:
         for text in texts:
             await callback.message.answer(text, parse_mode="HTML")
-        await callback.message.answer(
-            "⬆️ Инструкции для ваших платформ выше",
-            reply_markup=back_to_menu_kb(),
-        )
     else:
-        await callback.message.edit_text(
+        await callback.message.answer(
             full_text,
-            reply_markup=back_to_menu_kb(),
             parse_mode="HTML",
         )
+    await callback.message.answer(
+        "Выберите действие:",
+        reply_markup=main_menu_kb(),
+    )
     await callback.answer()
 
 
@@ -164,13 +163,13 @@ async def show_devices(callback: CallbackQuery):
     platforms_str = ", ".join(platform_names.get(p, p) for p in platforms)
     approved_date = (user["approved_at"] or "")[:10]
 
-    await callback.message.edit_text(
+    await callback.message.answer(
         f"📊 <b>Ваш профиль</b>\n\n"
         f"👤 {user['fio']}\n"
         f"📱 Устройств: {user['devices_count']}\n"
         f"💻 Платформы: {platforms_str}\n"
         f"📅 Доступ с: {approved_date}",
-        reply_markup=back_to_menu_kb(),
+        reply_markup=main_menu_kb(),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -183,7 +182,7 @@ async def start_question(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Доступ не активен", show_alert=True)
         return
 
-    await callback.message.edit_text(
+    await callback.message.answer(
         "💬 Задайте ваш вопрос о работе сервиса.",
         reply_markup=back_to_menu_kb(),
         parse_mode="HTML",
