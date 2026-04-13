@@ -5,7 +5,8 @@ from datetime import datetime
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from bot.db import queries as db
 from bot.services.proxy import get_free_uuids, generate_vless_link, update_client_limit_ip
@@ -16,10 +17,16 @@ from bot.keyboards.admin_kb import (
     unblock_kb,
     back_to_admin_kb,
 )
-from bot.keyboards.user_kb import main_menu_kb
+from bot.keyboards.user_kb import main_menu_kb, agreement_start_kb
 from bot.config import ADMIN_CHAT_ID
 
 router = Router()
+
+
+def exit_test_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Выйти из тест-режима", callback_data="exit_test_mode")]
+    ])
 
 
 def is_admin(user_id: int) -> bool:
@@ -63,6 +70,61 @@ async def admin_panel(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data == "admin_test_mode")
+async def admin_test_mode(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+
+    # Clean any previous test data for admin
+    await _cleanup_test_data(callback.from_user.id)
+
+    # Set test mode flag in FSM
+    await state.clear()
+    await state.update_data(test_mode=True)
+
+    await callback.message.edit_text(
+        "🧪 <b>Тест-режим активирован</b>\n\n"
+        "Вы увидите бота глазами нового сотрудника.\n"
+        "После теста данные будут удалены.",
+        parse_mode="HTML",
+    )
+
+    # Show the welcome screen as a new user would see it
+    await callback.message.answer(
+        "🔒 <b>NetLink</b> — корпоративный сервис защищённого доступа.\n\n"
+        "Для получения доступа необходимо принять условия использования.",
+        reply_markup=agreement_start_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "exit_test_mode")
+async def exit_test_mode(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+
+    await _cleanup_test_data(callback.from_user.id)
+    await state.clear()
+
+    stats = await db.get_stats()
+    await callback.message.edit_text(
+        "🔧 <b>Админ-панель NetLink</b>\n\n🧪 Тест-режим завершён. Данные очищены.",
+        reply_markup=admin_panel_kb(stats["pending"]),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+async def _cleanup_test_data(telegram_id: int):
+    """Remove admin's test user/request records from bot DB."""
+    from bot.db.models import get_db
+    async with get_db() as conn:
+        await conn.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))
+        await conn.execute("DELETE FROM requests WHERE telegram_id = ?", (telegram_id,))
+        await conn.commit()
+
+
 @router.callback_query(F.data == "admin_requests")
 async def admin_requests(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -97,7 +159,7 @@ async def admin_requests(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("approve_"))
-async def approve_request(callback: CallbackQuery):
+async def approve_request(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         return
 
@@ -112,6 +174,11 @@ async def approve_request(callback: CallbackQuery):
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True)
         return
+
+    # Check if this is a test mode approval (admin approving their own test request)
+    is_test = telegram_id == ADMIN_CHAT_ID
+    fsm_data = await state.get_data()
+    is_test = is_test and fsm_data.get("test_mode", False)
 
     # Get used emails
     approved_users = await db.get_users_by_status("approved")
@@ -132,14 +199,13 @@ async def approve_request(callback: CallbackQuery):
     # Generate VLESS link
     vless_link = generate_vless_link(uuid, "NetLink")
 
-    # Update limitIp in x-ui DB
-    update_client_limit_ip(email, devices_count)
-
-    # Restart x-ui to apply limitIp change
-    try:
-        subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
-    except Exception:
-        pass
+    if not is_test:
+        # Real approval: update x-ui DB and restart
+        update_client_limit_ip(email, devices_count)
+        try:
+            subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
+        except Exception:
+            pass
 
     # Update bot DB
     now = datetime.now().isoformat()
@@ -157,27 +223,47 @@ async def approve_request(callback: CallbackQuery):
         request_id, status="approved", resolved_at=now
     )
 
-    # Notify user
-    await callback.bot.send_message(
-        telegram_id,
-        f"✅ <b>Доступ одобрен!</b>\n\n"
-        f"🔗 Ваша персональная ссылка:\n"
-        f"<code>{vless_link}</code>\n\n"
-        f"Нажмите на ссылку чтобы скопировать, затем следуйте инструкции.",
-        reply_markup=main_menu_kb(),
-        parse_mode="HTML",
-    )
+    if is_test:
+        # Test mode: show result to admin directly with exit button
+        await callback.message.edit_text(
+            callback.message.text + f"\n\n✅ Одобрено (тест) → {email}",
+            parse_mode="HTML",
+        )
+        await callback.bot.send_message(
+            telegram_id,
+            f"🧪 <b>Тест: Доступ одобрен!</b>\n\n"
+            f"🔗 Ваша персональная ссылка:\n"
+            f"<code>{vless_link}</code>\n\n"
+            f"Это тестовая ссылка. Нажмите кнопку ниже для просмотра инструкций,\n"
+            f"или выйдите из тест-режима.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📖 Инструкция", callback_data="instruction")],
+                [InlineKeyboardButton(text="⚙️ Мои устройства", callback_data="my_devices")],
+                [InlineKeyboardButton(text="🔙 Выйти из тест-режима", callback_data="exit_test_mode")],
+            ]),
+            parse_mode="HTML",
+        )
+    else:
+        # Real approval: notify user
+        await callback.bot.send_message(
+            telegram_id,
+            f"✅ <b>Доступ одобрен!</b>\n\n"
+            f"🔗 Ваша персональная ссылка:\n"
+            f"<code>{vless_link}</code>\n\n"
+            f"Нажмите на ссылку чтобы скопировать, затем следуйте инструкции.",
+            reply_markup=main_menu_kb(),
+            parse_mode="HTML",
+        )
+        await callback.message.edit_text(
+            callback.message.text + f"\n\n✅ Одобрено → {email}",
+            parse_mode="HTML",
+        )
 
-    # Update admin message
-    await callback.message.edit_text(
-        callback.message.text + f"\n\n✅ Одобрено → {email}",
-        parse_mode="HTML",
-    )
     await callback.answer(f"Одобрено: {email}")
 
 
 @router.callback_query(F.data.startswith("reject_"))
-async def reject_request(callback: CallbackQuery):
+async def reject_request(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         return
 
@@ -187,19 +273,35 @@ async def reject_request(callback: CallbackQuery):
         await callback.answer("Заявка уже обработана", show_alert=True)
         return
 
+    telegram_id = req["telegram_id"]
+    fsm_data = await state.get_data()
+    is_test = telegram_id == ADMIN_CHAT_ID and fsm_data.get("test_mode", False)
+
     now = datetime.now().isoformat()
     await db.update_request(request_id, status="rejected", resolved_at=now)
-    await db.update_user(req["telegram_id"], status="rejected")
+    await db.update_user(telegram_id, status="rejected")
 
-    await callback.bot.send_message(
-        req["telegram_id"],
-        "❌ Ваша заявка отклонена. Обратитесь к администратору лично.",
-    )
-
-    await callback.message.edit_text(
-        callback.message.text + "\n\n❌ Отклонено",
-        parse_mode="HTML",
-    )
+    if is_test:
+        await callback.message.edit_text(
+            callback.message.text + "\n\n❌ Отклонено (тест)",
+            parse_mode="HTML",
+        )
+        await callback.bot.send_message(
+            telegram_id,
+            "🧪 Тест: заявка отклонена.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Выйти из тест-режима", callback_data="exit_test_mode")]
+            ]),
+        )
+    else:
+        await callback.bot.send_message(
+            telegram_id,
+            "❌ Ваша заявка отклонена. Обратитесь к администратору лично.",
+        )
+        await callback.message.edit_text(
+            callback.message.text + "\n\n❌ Отклонено",
+            parse_mode="HTML",
+        )
     await callback.answer("Отклонено")
 
 

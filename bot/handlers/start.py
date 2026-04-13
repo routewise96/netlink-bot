@@ -48,20 +48,24 @@ class Registration(StatesGroup):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
     telegram_id = message.from_user.id
 
-    # Admin gets admin panel directly, no registration needed
-    if telegram_id == ADMIN_CHAT_ID:
-        from bot.db.queries import get_stats
-        stats = await get_stats()
-        from bot.keyboards.admin_kb import admin_panel_kb
-        await message.answer(
-            "🔧 <b>Админ-панель NetLink</b>",
-            reply_markup=admin_panel_kb(stats["pending"]),
-            parse_mode="HTML",
-        )
-        return
+    # Check if admin is in test mode — if so, don't clear state, let flow continue
+    data = await state.get_data()
+    if not data.get("test_mode"):
+        await state.clear()
+
+        # Admin gets admin panel directly, no registration needed
+        if telegram_id == ADMIN_CHAT_ID:
+            from bot.db.queries import get_stats
+            stats = await get_stats()
+            from bot.keyboards.admin_kb import admin_panel_kb
+            await message.answer(
+                "🔧 <b>Админ-панель NetLink</b>",
+                reply_markup=admin_panel_kb(stats["pending"]),
+                parse_mode="HTML",
+            )
+            return
 
     user = await db.get_user(telegram_id)
 

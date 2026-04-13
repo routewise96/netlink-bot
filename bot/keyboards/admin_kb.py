@@ -21,6 +21,9 @@ def admin_panel_kb(pending_count: int = 0) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🚫 Заблокированные", callback_data="admin_blocked"),
             InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
         ],
+        [
+            InlineKeyboardButton(text="🧪 Тест-режим", callback_data="admin_test_mode"),
+        ],
     ])
 
 
