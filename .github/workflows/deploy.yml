@@ -1,0 +1,29 @@
+name: Deploy NetLink Bot
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 89.125.24.203
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22847
+          proxy_host: 78.17.4.197
+          proxy_username: root
+          proxy_key: ${{ secrets.SSH_PRIVATE_KEY }}
+          proxy_port: 22847
+          script: |
+            cd /opt/netlink-bot
+            git pull origin main 2>/dev/null || (git init && git remote add origin https://github.com/routewise96/netlink-bot.git && git pull origin main)
+            pip install -r requirements.txt --break-system-packages -q
+            systemctl restart netlink-bot
+            sleep 2
+            systemctl status netlink-bot | head -5
