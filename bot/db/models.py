@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS user_devices (
     vless_link TEXT,
     platform TEXT,
     subscription_url TEXT,
+    app_choice TEXT,
     status TEXT DEFAULT 'active',
     banned_at TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id)
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS requests (
     devices_count INTEGER,
     platforms TEXT,
     status TEXT DEFAULT 'pending',
+    request_type TEXT DEFAULT 'initial',
     admin_message_id INTEGER,
     created_at TEXT DEFAULT (datetime('now')),
     resolved_at TEXT
@@ -61,6 +63,21 @@ CREATE TABLE IF NOT EXISTS ai_conversations (
 async def init_db():
     async with aiosqlite.connect(NETLINK_DB_PATH) as db:
         await db.executescript(SCHEMA)
+        # migrations
+        try:
+            await db.execute("ALTER TABLE user_devices ADD COLUMN app_choice TEXT")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE requests ADD COLUMN request_type TEXT DEFAULT 'initial'")
+        except Exception:
+            pass
+        try:
+            await db.execute(
+                "ALTER TABLE user_devices ADD COLUMN is_admin_device INTEGER DEFAULT 0"
+            )
+        except Exception:
+            pass
         await db.commit()
 
 

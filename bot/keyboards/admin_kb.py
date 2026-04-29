@@ -22,6 +22,12 @@ def admin_panel_kb(pending_count: int = 0) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
         ],
         [
+            InlineKeyboardButton(text="➕ Добавить себе устройство", callback_data="admin_add_self"),
+        ],
+        [
+            InlineKeyboardButton(text="📱 Мои устройства", callback_data="admin_my_devices"),
+        ],
+        [
             InlineKeyboardButton(text="🧪 Тест-режим", callback_data="admin_test_mode"),
         ],
     ])
@@ -46,6 +52,7 @@ def user_detail_kb(telegram_id: int, devices: list[dict] | None = None) -> Inlin
                     text=f"🟢 Разбан {plat}", callback_data=f"unbandev_{did}",
                 )])
     rows.append([InlineKeyboardButton(text="🔴 Заблокировать всё", callback_data=f"block_{telegram_id}")])
+    rows.append([InlineKeyboardButton(text="🔄 Сбросить пользователя", callback_data=f"resetuser_{telegram_id}")])
     rows.append([InlineKeyboardButton(text="🔗 Его ссылки", callback_data=f"userlink_{telegram_id}")])
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")])
     return rows_to_kb(rows)

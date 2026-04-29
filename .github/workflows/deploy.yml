@@ -12,18 +12,37 @@ jobs:
       - name: Deploy to server
         uses: appleboy/ssh-action@v1
         with:
-          host: 89.125.24.203
+          host: 78.17.4.197
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22847
-          proxy_host: 78.17.4.197
-          proxy_username: root
-          proxy_key: ${{ secrets.SSH_PRIVATE_KEY }}
-          proxy_port: 22847
           script: |
+            set -euo pipefail
             cd /opt/netlink-bot
-            git pull origin main 2>/dev/null || (git init && git remote add origin https://github.com/routewise96/netlink-bot.git && git pull origin main)
+
+            # Backup current state (keep last 5)
+            mkdir -p /root/netlink-backups
+            tar czf "/root/netlink-backups/netlink-bot-$(date +%Y%m%d-%H%M%S).tar.gz" \
+              -C /opt netlink-bot
+            ls -1t /root/netlink-backups/netlink-bot-*.tar.gz | tail -n +6 | xargs -r rm -f
+
+            # First-run init: turn /opt/netlink-bot into a git checkout
+            if [ ! -d .git ]; then
+              git init
+              git remote add origin https://github.com/routewise96/netlink-bot.git
+            fi
+
+            # Force-sync to origin/main (untracked files like netlink.db, .env are preserved)
+            git fetch origin main
+            git reset --hard origin/main
+
             pip install -r requirements.txt --break-system-packages -q
             systemctl restart netlink-bot
-            sleep 2
-            systemctl status netlink-bot | head -5
+            sleep 5
+            if ! systemctl is-active --quiet netlink-bot; then
+              echo "❌ Bot is not running after deploy"
+              journalctl -u netlink-bot -n 30 --no-pager
+              exit 1
+            fi
+            echo "✅ Bot is running"
+            journalctl -u netlink-bot -n 5 --no-pager
