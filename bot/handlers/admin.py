@@ -1,6 +1,5 @@
 """Admin panel: approve/reject, per-device management, stats."""
 import json
-import subprocess
 from datetime import datetime
 
 from aiogram import Router, F
@@ -261,10 +260,6 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
 
     if not is_test:
         update_clients_limit_ip(emails_to_update, 1)
-        try:
-            subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
-        except Exception:
-            pass
 
     now = datetime.now().isoformat()
     first = assigned[0]
@@ -477,10 +472,6 @@ async def ban_device(callback: CallbackQuery):
 
     await db.ban_device(device_id)
     update_clients_limit_ip([device["email"]], 0)
-    try:
-        subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
-    except Exception:
-        pass
 
     from bot.db.models import get_db
     async with get_db() as conn:
@@ -511,10 +502,6 @@ async def unban_device(callback: CallbackQuery):
 
     await db.unban_device(device_id)
     update_clients_limit_ip([device["email"]], 1)
-    try:
-        subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
-    except Exception:
-        pass
 
     from bot.db.models import get_db
     async with get_db() as conn:
@@ -548,10 +535,6 @@ async def block_user(callback: CallbackQuery):
     emails = [d["email"] for d in devices if d["status"] == "active"]
     if emails:
         update_clients_limit_ip(emails, 0)
-        try:
-            subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
-        except Exception:
-            pass
 
     user = await db.get_user(telegram_id)
     try:
@@ -585,10 +568,6 @@ async def unblock_user(callback: CallbackQuery):
     emails = [d["email"] for d in devices]
     if emails:
         update_clients_limit_ip(emails, 1)
-        try:
-            subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
-        except Exception:
-            pass
 
     user = await db.get_user(telegram_id)
     try:
@@ -758,10 +737,6 @@ async def add_device_approve(callback: CallbackQuery):
 
     client = free[0]
     update_clients_limit_ip([client["email"]], 1)
-    try:
-        subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
-    except Exception:
-        pass
 
     next_num = max([d["device_number"] for d in existing], default=0) + 1
     plat_name = PLATFORM_NAMES.get(platform, str(next_num))
@@ -864,7 +839,6 @@ async def admin_reset_user(callback: CallbackQuery):
     if active_emails:
         try:
             update_clients_limit_ip(active_emails, 0)
-            subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
         except Exception:
             pass
 
@@ -980,6 +954,13 @@ async def admin_add_self_pick(callback: CallbackQuery):
         callback.from_user.id, callback.from_user.username
     )
 
+    existing = await db.get_user_devices(callback.from_user.id)
+    active = [d for d in existing if d["status"] == "active"]
+    owned = {d["platform"] for d in active if d.get("platform")}
+    if platform in owned:
+        await callback.answer("Эта платформа уже подключена", show_alert=True)
+        return
+
     used_emails = await db.get_all_used_emails()
     free = get_free_uuids(used_emails)
     if not free:
@@ -987,14 +968,9 @@ async def admin_add_self_pick(callback: CallbackQuery):
         return
     client = free[0]
 
-    existing = await db.get_user_devices(callback.from_user.id)
     next_num = max([d["device_number"] for d in existing], default=0) + 1
 
     update_clients_limit_ip([client["email"]], 1)
-    try:
-        subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
-    except Exception:
-        pass
 
     plat_name = PLATFORM_NAMES.get(platform, platform)
     vless = generate_vless_link(client["id"], f"NetLink-{plat_name}")
@@ -1146,7 +1122,6 @@ async def admin_delete_execute(callback: CallbackQuery):
     await db.delete_user_device(device_id)
     try:
         update_clients_limit_ip([email], 0)
-        subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
     except Exception:
         pass
 

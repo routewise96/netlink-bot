@@ -637,7 +637,6 @@ async def user_reset_start(callback: CallbackQuery):
 
 @router.callback_query(F.data == "user_reset_confirm")
 async def user_reset_confirm(callback: CallbackQuery, state: FSMContext):
-    import subprocess
     telegram_id = callback.from_user.id
     user = await db.get_user(telegram_id)
     if not user:
@@ -650,7 +649,6 @@ async def user_reset_confirm(callback: CallbackQuery, state: FSMContext):
     if active_emails:
         try:
             update_clients_limit_ip(active_emails, 0)
-            subprocess.run(["systemctl", "restart", "x-ui"], timeout=10)
         except Exception:
             pass
 
