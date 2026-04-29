@@ -107,7 +107,13 @@ def update_client_limit_ip(email: str, limit_ip: int) -> None:
 
 
 def update_clients_limit_ip(emails: list[str], limit_ip: int) -> None:
-    """Batch update limitIp for multiple clients in x-ui DB (single write)."""
+    """Batch update limitIp for multiple clients in x-ui DB (single write).
+
+    TODO: limitIp игнорируется с flow=xtls-rprx-vision (3x-ui issue #3255).
+    Текущий механизм "1 устройство = 1 ссылка" фактически не работает.
+    Нужно либо менять flow, либо реализовать enforcement на уровне бота
+    (например, периодически проверять количество активных IP через access.log).
+    """
     conn = sqlite3.connect(XUI_DB_PATH)
     try:
         row = conn.execute(
