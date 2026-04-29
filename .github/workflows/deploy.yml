@@ -36,7 +36,7 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
 
-            pip install -r requirements.txt --break-system-packages -q
+            pip install -r requirements.txt -q
             systemctl restart netlink-bot
             sleep 5
             if ! systemctl is-active --quiet netlink-bot; then
