@@ -44,12 +44,14 @@ async def update_user(telegram_id: int, **kwargs) -> None:
 
 
 async def create_request(
-    telegram_id: int, fio: str, devices_count: int, platforms: str
+    telegram_id: int, fio: str, devices_count: int, platforms: str,
+    request_type: str = "initial",
 ) -> int:
     async with get_db() as db:
         cursor = await db.execute(
-            "INSERT INTO requests (telegram_id, fio, devices_count, platforms) VALUES (?, ?, ?, ?)",
-            (telegram_id, fio, devices_count, platforms),
+            "INSERT INTO requests (telegram_id, fio, devices_count, platforms, request_type) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (telegram_id, fio, devices_count, platforms, request_type),
         )
         await db.commit()
         return cursor.lastrowid
@@ -87,10 +89,13 @@ async def update_request(request_id: int, **kwargs) -> None:
 
 
 async def get_pending_requests() -> list[dict]:
+    """Return pending initial-signup requests only (add-device requests are notified live)."""
     async with get_db() as db:
         db.row_factory = aiosqlite_row_factory
         cursor = await db.execute(
-            "SELECT * FROM requests WHERE status = 'pending' ORDER BY created_at DESC"
+            "SELECT * FROM requests "
+            "WHERE status = 'pending' AND COALESCE(request_type, 'initial') = 'initial' "
+            "ORDER BY created_at DESC"
         )
         return await cursor.fetchall()
 
@@ -110,17 +115,27 @@ async def get_users_by_status(status: str) -> list[dict]:
 async def create_user_device(
     user_id: int, device_number: int, uuid: str, email: str,
     sub_id: str, vless_link: str, subscription_url: str,
-    platform: str = "",
+    platform: str = "", app_choice: str = "", is_admin_device: bool = False,
 ) -> int:
     async with get_db() as db:
         cursor = await db.execute(
             """INSERT INTO user_devices
-               (user_id, device_number, uuid, email, sub_id, vless_link, subscription_url, platform)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, device_number, uuid, email, sub_id, vless_link, subscription_url, platform),
+               (user_id, device_number, uuid, email, sub_id, vless_link,
+                subscription_url, platform, app_choice, is_admin_device)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, device_number, uuid, email, sub_id, vless_link,
+             subscription_url, platform, app_choice or None,
+             1 if is_admin_device else 0),
         )
         await db.commit()
         return cursor.lastrowid
+
+
+async def delete_user_device(device_id: int) -> None:
+    """Hard-delete a user_devices row (admin-initiated)."""
+    async with get_db() as db:
+        await db.execute("DELETE FROM user_devices WHERE id = ?", (device_id,))
+        await db.commit()
 
 
 async def get_user_devices(telegram_id: int) -> list[dict]:
@@ -213,6 +228,27 @@ async def delete_user_devices(telegram_id: int) -> None:
             """DELETE FROM user_devices
                WHERE user_id = (SELECT id FROM users WHERE telegram_id = ?)""",
             (telegram_id,),
+        )
+        await db.commit()
+
+
+async def update_device_app_choice(telegram_id: int, platform: str, app_choice: str) -> None:
+    """Set app_choice for all devices of a given platform for a user."""
+    async with get_db() as db:
+        await db.execute(
+            """UPDATE user_devices SET app_choice = ?
+               WHERE platform = ? AND user_id = (SELECT id FROM users WHERE telegram_id = ?)""",
+            (app_choice, platform, telegram_id),
+        )
+        await db.commit()
+
+
+async def update_device_platform(device_id: int, platform: str) -> None:
+    """Update platform column for a single device."""
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE user_devices SET platform = ? WHERE id = ?",
+            (platform, device_id),
         )
         await db.commit()
 

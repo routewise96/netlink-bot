@@ -31,10 +31,25 @@ def get_stream_settings() -> dict:
     return stream
 
 
+def _is_pool_email(email: str) -> bool:
+    """Only "user-NNN" emails (where NNN is digits) are part of the bot pool.
+    Family/personal clients (Daniel, Mac, Brother, User-6..User-23) are never handed out."""
+    if not email.startswith("user-"):
+        return False
+    suffix = email[5:]
+    return suffix.isdigit()
+
+
 def get_free_uuids(used_emails: set[str]) -> list[dict]:
-    """Return clients not yet assigned to any bot user."""
+    """Return clients not yet assigned to any bot user.
+    Only pool clients (user-NNN) are considered; family UUIDs are excluded."""
     clients = get_all_clients()
-    return [c for c in clients if c["email"] not in used_emails and c.get("enable", True)]
+    return [
+        c for c in clients
+        if _is_pool_email(c["email"])
+        and c["email"] not in used_emails
+        and c.get("enable", True)
+    ]
 
 
 def get_client_by_email(email: str) -> dict | None:

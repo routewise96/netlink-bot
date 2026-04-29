@@ -10,6 +10,5 @@ DEEPSEEK_API_URL = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1/ch
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 XUI_DB_PATH = os.getenv("XUI_DB_PATH", "/etc/x-ui/x-ui.db")
 NETLINK_DB_PATH = os.getenv("NETLINK_DB_PATH", "/opt/netlink-bot/netlink.db")
-SERVER_IP = os.getenv("SERVER_IP", "89.125.24.203")
+SERVER_IP = os.getenv("SERVER_IP", "78.17.4.197")
 SOCKS_PROXY = os.getenv("SOCKS_PROXY", "socks5://127.0.0.1:1080")
-STREISAND_ROUTE_URL = os.getenv("STREISAND_ROUTE_URL", "")

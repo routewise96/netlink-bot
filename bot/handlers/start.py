@@ -52,14 +52,14 @@ class Registration(StatesGroup):
 async def cmd_start(message: Message, state: FSMContext):
     telegram_id = message.from_user.id
 
-    data = await state.get_data()
-    if not data.get("test_mode"):
-        await state.clear()
-
-        if telegram_id == ADMIN_CHAT_ID:
+    # Admin check ALWAYS first — before any DB lookups
+    if telegram_id == ADMIN_CHAT_ID:
+        data = await state.get_data()
+        if not data.get("test_mode"):
+            await state.clear()
             from bot.db.queries import get_stats
-            stats = await get_stats()
             from bot.keyboards.admin_kb import admin_panel_kb
+            stats = await get_stats()
             await message.answer(
                 "🔧 <b>Админ-панель NetLink</b>",
                 reply_markup=admin_panel_kb(stats["pending"]),
@@ -67,6 +67,7 @@ async def cmd_start(message: Message, state: FSMContext):
             )
             return
 
+    await state.clear()
     user = await db.get_user(telegram_id)
 
     if user and user["status"] == "approved":
@@ -78,6 +79,22 @@ async def cmd_start(message: Message, state: FSMContext):
         return
 
     if user and user["status"] == "pending":
+        # Incomplete registration: fio not entered yet → resume from FIO step
+        if not user.get("fio"):
+            await message.answer("✅ Условия приняты.\n\nВведите ваше ФИО (полностью):")
+            await state.set_state(Registration.waiting_fio)
+            return
+        # FIO entered but platforms not selected → resume from platforms step
+        if not user.get("platforms"):
+            await state.update_data(fio=user["fio"], selected_platforms=set())
+            await message.answer(
+                "📱 На каких устройствах будете использовать?\n"
+                "(выберите все нужные, затем нажмите «Готово»)",
+                reply_markup=platforms_kb(),
+            )
+            await state.set_state(Registration.waiting_platforms)
+            return
+        # Registration complete, genuinely waiting for admin
         await message.answer(
             "⏳ Ваша заявка ожидает рассмотрения. Пожалуйста, дождитесь ответа администратора."
         )
