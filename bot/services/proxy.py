@@ -2,7 +2,7 @@
 import json
 import sqlite3
 import urllib.parse
-from bot.config import XUI_DB_PATH, SERVER_IP
+from bot.config import XUI_DB_PATH, SERVER_IP, RESERVED_EMAILS
 
 
 def _get_xui_data() -> tuple[list[dict], dict]:
@@ -32,8 +32,11 @@ def get_stream_settings() -> dict:
 
 
 def _is_pool_email(email: str) -> bool:
-    """Only "user-NNN" emails (where NNN is digits) are part of the bot pool.
-    Family/personal clients (Daniel, Mac, Brother, User-6..User-23) are never handed out."""
+    """Only "user-NNN" emails (where NNN is digits) and not in RESERVED_EMAILS
+    are part of the bot pool. Family/personal clients (guest-temp, etc.) and
+    reserved family-shared emails (RESERVED_EMAILS) are never handed out."""
+    if email in RESERVED_EMAILS:
+        return False
     if not email.startswith("user-"):
         return False
     suffix = email[5:]
@@ -50,6 +53,25 @@ def get_free_uuids(used_emails: set[str]) -> list[dict]:
         and c["email"] not in used_emails
         and c.get("enable", True)
     ]
+
+
+def check_reserved_emails() -> tuple[list[str], list[str]]:
+    """Verify each RESERVED_EMAILS entry exists and is enabled in x-ui pool.
+
+    Catches typos in RESERVED_EMAILS or accidental delete/disable in the x-ui panel.
+    Returns (ok, problems) where each problem is a short human-readable reason.
+    """
+    by_email = {c["email"]: c for c in get_all_clients()}
+    ok, problems = [], []
+    for email in sorted(RESERVED_EMAILS):
+        cl = by_email.get(email)
+        if cl is None:
+            problems.append(f"{email}: not found in x-ui")
+        elif not cl.get("enable", True):
+            problems.append(f"{email}: disabled in x-ui")
+        else:
+            ok.append(email)
+    return ok, problems
 
 
 def get_client_by_email(email: str) -> dict | None:

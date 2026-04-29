@@ -12,3 +12,14 @@ XUI_DB_PATH = os.getenv("XUI_DB_PATH", "/etc/x-ui/x-ui.db")
 NETLINK_DB_PATH = os.getenv("NETLINK_DB_PATH", "/opt/netlink-bot/netlink.db")
 SERVER_IP = os.getenv("SERVER_IP", "78.17.4.197")
 SOCKS_PROXY = os.getenv("SOCKS_PROXY", "socks5://127.0.0.1:1080")
+
+# Emails выданы родным напрямую вне пула бота.
+# Активные VLESS-ссылки в чатах с родными — нельзя перевыдавать.
+# Чтобы освободить — убрать из списка и убедиться, что old VLESS более не нужна.
+RESERVED_EMAILS = frozenset({
+    "user-018",
+    "user-031",
+    "user-032",
+    "user-033",
+    "user-034",
+})
