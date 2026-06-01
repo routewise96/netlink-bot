@@ -956,10 +956,6 @@ async def admin_add_self_pick(callback: CallbackQuery):
 
     existing = await db.get_user_devices(callback.from_user.id)
     active = [d for d in existing if d["status"] == "active"]
-    owned = {d["platform"] for d in active if d.get("platform")}
-    if platform in owned:
-        await callback.answer("Эта платформа уже подключена", show_alert=True)
-        return
 
     used_emails = await db.get_all_used_emails()
     free = get_free_uuids(used_emails)
