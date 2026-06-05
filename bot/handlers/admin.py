@@ -176,8 +176,8 @@ def _build_device_link_block(dd: dict) -> str:
         url = dd["vless"]
         return (
             f"{label}:\n"
-            f"Нажмите — ссылка скопируется автоматически:\n"
-            f"{url}\n"
+            f"Скопируйте ссылку и добавьте в ваш VPN-клиент:\n"
+            f"<code>{url}</code>\n"
         )
     else:
         return f"{label}:\n<code>{dd['vless']}</code>\n"
@@ -203,8 +203,8 @@ def _build_approval_text(devices_data: list[dict]) -> str:
             url = dd["vless"]
             lines.append(
                 f"{label}:\n"
-                f"Нажмите — ссылка скопируется автоматически:\n"
-                f"{url}\n"
+                f"Скопируйте ссылку и добавьте в ваш VPN-клиент:\n"
+                f"<code>{url}</code>\n"
             )
             has_mobile = True
         else:
@@ -616,7 +616,7 @@ async def show_user_link(callback: CallbackQuery):
                 lines.append(f"<code>{d.get('subscription_url', '')}</code>")
             elif platform in ("iphone", "android") and d.get("sub_id"):
                 url = d.get("vless_link", "")
-                lines.append(f"{url}")
+                lines.append(f"<code>{url}</code>")
             else:
                 lines.append(f"<code>{d.get('vless_link', '')}</code>")
         else:
@@ -909,7 +909,7 @@ def _admin_device_link_text(platform: str, email: str, sub_id: str,
     elif platform in ("iphone", "android"):
         url = vless_link
         body = (
-            f"{label}:\nНажмите — ссылка скопируется автоматически:\n{url}\n\n"
+            f"{label}:\nСкопируйте ссылку и добавьте в ваш VPN-клиент:\n<code>{url}</code>\n\n"
             "v2RayTun → + → «Импорт из буфера обмена» → Connect."
         )
     else:  # windows
