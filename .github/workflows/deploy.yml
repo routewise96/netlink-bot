@@ -45,9 +45,14 @@ jobs:
             install -m 644 deploy/netlink-ip-monitor.service /etc/systemd/system/netlink-ip-monitor.service
             install -m 644 deploy/netlink-ip-monitor.timer /etc/systemd/system/netlink-ip-monitor.timer
 
+            # Install/refresh temp-link cleanup (oneshot + timer)
+            install -m 644 deploy/netlink-temp-cleanup.service /etc/systemd/system/netlink-temp-cleanup.service
+            install -m 644 deploy/netlink-temp-cleanup.timer /etc/systemd/system/netlink-temp-cleanup.timer
+
             systemctl daemon-reload
             systemctl enable netlink-profile.service >/dev/null
             systemctl enable --now netlink-ip-monitor.timer >/dev/null
+            systemctl enable --now netlink-temp-cleanup.timer >/dev/null
 
             # Open subscription port (idempotent)
             ufw allow 8080/tcp >/dev/null 2>&1 || true

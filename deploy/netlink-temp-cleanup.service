@@ -1,0 +1,11 @@
+[Unit]
+Description=NetLink temporary registration link cleanup
+After=network.target netlink-bot.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/netlink-bot
+ExecStart=/usr/bin/python3 -m bot.services.cleanup_temp
+StandardOutput=append:/var/log/netlink-temp-cleanup.log
+StandardError=append:/var/log/netlink-temp-cleanup.log

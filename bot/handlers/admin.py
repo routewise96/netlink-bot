@@ -2,7 +2,8 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -1362,3 +1363,63 @@ async def cmd_violations(message: Message):
                                  parse_mode="HTML")
             continue
         await message.answer(head, parse_mode="HTML", reply_markup=_violation_kb(device_id))
+
+
+# ── Temporary registration link (for onboarding new staff w/o VPN) ──
+
+TEMP_LINK_TTL_SECONDS = 3600
+
+
+@router.callback_query(F.data == "issue_temp_link")
+async def cb_issue_temp_link(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+
+    used_emails = await db.get_all_used_emails()
+    free = get_free_uuids(used_emails)
+    if not free:
+        await callback.answer("Свободных UUID в пуле нет", show_alert=True)
+        return
+
+    client = free[0]
+    sub_id = secrets.token_urlsafe(8).replace("_", "").replace("-", "")[:16]
+    now = datetime.now()
+    expires = now + timedelta(seconds=TEMP_LINK_TTL_SECONDS)
+    subscription_url = f"http://{SERVER_IP}:8080/profiles/{sub_id}.json"
+    vless = generate_vless_link(client["id"], "NetLink-Temp")
+
+    # NOTE: schema requires user_id NOT NULL → use sentinel 0 for orphan temp rows.
+    from bot.db.models import get_db as _get_db
+    async with _get_db() as conn:
+        await conn.execute(
+            """INSERT INTO user_devices
+               (user_id, device_number, uuid, email, sub_id,
+                vless_link, subscription_url, platform, app_choice,
+                status, is_temp, expires_at)
+               VALUES (0, 0, ?, ?, ?, ?, ?, '', '', 'active', 1, ?)""",
+            (client["id"], client["email"], sub_id, vless,
+             subscription_url, expires.isoformat()),
+        )
+        await conn.commit()
+
+    update_clients_limit_ip([client["email"]], 1)
+
+    text = (
+        "🎟 <b>Временная ссылка для регистрации</b>\n\n"
+        f"Действует до: {expires.strftime('%d.%m %H:%M')} (по серверу UTC)\n"
+        f"UUID: {client['email']}\n\n"
+        f"<code>{subscription_url}</code>\n\n"
+        "Передайте новому сотруднику. Через час ссылка автоматически отключается.\n\n"
+        "Что должен сделать сотрудник:\n"
+        "1. Установить Hiddify\n"
+        "2. Импортировать эту подписку по ссылке\n"
+        "3. Подключиться к VPN\n"
+        "4. Открыть @netlink_corp_bot и пройти регистрацию\n"
+        "5. Получить от вас approve в боте\n"
+        "6. Получить свою постоянную подписку"
+    )
+    await callback.message.answer(
+        text, reply_markup=back_to_admin_kb(), parse_mode="HTML",
+    )
+    await callback.answer(f"Выдано: {client['email']}")

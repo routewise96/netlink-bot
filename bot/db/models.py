@@ -105,6 +105,16 @@ async def init_db():
             )
         except Exception:
             pass
+        try:
+            await db.execute(
+                "ALTER TABLE user_devices ADD COLUMN is_temp INTEGER DEFAULT 0"
+            )
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE user_devices ADD COLUMN expires_at TEXT")
+        except Exception:
+            pass
         await db.commit()
 
 

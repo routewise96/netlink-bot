@@ -28,6 +28,10 @@ def admin_panel_kb(pending_count: int = 0) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📱 Мои устройства", callback_data="admin_my_devices"),
         ],
         [
+            InlineKeyboardButton(text="🎟 Временная ссылка для регистрации",
+                                 callback_data="issue_temp_link"),
+        ],
+        [
             InlineKeyboardButton(text="🧪 Тест-режим", callback_data="admin_test_mode"),
         ],
     ])
