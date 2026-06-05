@@ -12,7 +12,7 @@ jobs:
       - name: Deploy to server
         uses: appleboy/ssh-action@v1
         with:
-          host: 78.17.4.197
+          host: 153.75.85.138
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22847
@@ -36,7 +36,7 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
 
-            pip install -r requirements.txt -q
+            pip install -r requirements.txt -q --break-system-packages
             systemctl restart netlink-bot
             sleep 5
             if ! systemctl is-active --quiet netlink-bot; then

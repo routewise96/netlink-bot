@@ -11,7 +11,7 @@ from aiogram.types import (
 
 from bot.db import queries as db
 from bot.services import deepseek
-from bot.services.proxy import update_clients_limit_ip
+from bot.services.proxy import update_clients_limit_ip, generate_vless_link
 from bot.keyboards.user_kb import (
     main_menu_kb, back_to_menu_kb, link_and_back_kb, add_device_platforms_kb,
 )
@@ -64,32 +64,19 @@ def _build_devices_text(devices: list[dict]) -> str:
         "При использовании на двух устройствах одновременно — ссылка блокируется автоматически.\n"
     )
 
-    has_routing = False
     for d in devices:
         platform = d.get("platform", "")
-        sub_id = d.get("sub_id", "")
         label = PLATFORM_LABELS.get(platform, f"📱 Устройство {d['device_number']}")
 
         if d["status"] != "active":
             lines.append(f"{label}: 🔴 заблокировано\n")
             continue
 
-        if platform == "macos":
-            lines.append(f"{label}:\n<code>{d.get('subscription_url', '')}</code>\n")
-        elif platform in ("iphone", "android") and sub_id:
-            url = _connect_url(sub_id)
-            lines.append(
-                f"{label}:\n"
-                f"Нажмите — ссылка скопируется автоматически:\n"
-                f"{url}\n"
-            )
-            has_routing = True
-        else:
-            # windows or fallback
-            lines.append(f"{label}:\n<code>{d.get('vless_link', '')}</code>\n")
-
-    if has_routing:
-        lines.append(_routing_text())
+        lines.append(
+            f"{label}:\n"
+            f"<code>{generate_vless_link(d['uuid'], label)}</code>\n"
+            f"Скопируйте ссылку и добавьте в ваш VPN-клиент.\n"
+        )
 
     lines.append("Нажмите 📖 Инструкция для пошаговой настройки.")
     return "\n".join(lines)

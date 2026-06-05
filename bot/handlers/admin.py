@@ -173,7 +173,7 @@ def _build_device_link_block(dd: dict) -> str:
     if platform == "macos":
         return f"{label}:\n<code>{dd['sub_url']}</code>\n"
     elif platform in ("iphone", "android") and dd.get("sub_id"):
-        url = f"http://{SERVER_IP}:8080/connect/{dd['sub_id']}.html"
+        url = dd["vless"]
         return (
             f"{label}:\n"
             f"Нажмите — ссылка скопируется автоматически:\n"
@@ -200,7 +200,7 @@ def _build_approval_text(devices_data: list[dict]) -> str:
         if platform == "macos":
             lines.append(f"{label}:\n<code>{dd['sub_url']}</code>\n")
         elif platform in ("iphone", "android") and dd.get("sub_id"):
-            url = f"http://{SERVER_IP}:8080/connect/{dd['sub_id']}.html"
+            url = dd["vless"]
             lines.append(
                 f"{label}:\n"
                 f"Нажмите — ссылка скопируется автоматически:\n"
@@ -282,7 +282,7 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
     for i, (client, platform) in enumerate(zip(assigned, platforms), 1):
         plat_name = PLATFORM_NAMES.get(platform, str(i))
         vless = generate_vless_link(client["id"], f"NetLink-{plat_name}")
-        sub_url = f"http://{SERVER_IP}:8080/profiles/{client['subId']}.json"
+        sub_url = vless
         app = "happ" if platform in ("android", "iphone") else ""
         await db.create_user_device(
             user_id=user_id,
@@ -615,7 +615,7 @@ async def show_user_link(callback: CallbackQuery):
             if platform == "macos":
                 lines.append(f"<code>{d.get('subscription_url', '')}</code>")
             elif platform in ("iphone", "android") and d.get("sub_id"):
-                url = f"http://{SERVER_IP}:8080/connect/{d['sub_id']}.html"
+                url = d.get("vless_link", "")
                 lines.append(f"{url}")
             else:
                 lines.append(f"<code>{d.get('vless_link', '')}</code>")
@@ -741,7 +741,7 @@ async def add_device_approve(callback: CallbackQuery):
     next_num = max([d["device_number"] for d in existing], default=0) + 1
     plat_name = PLATFORM_NAMES.get(platform, str(next_num))
     vless = generate_vless_link(client["id"], f"NetLink-{plat_name}")
-    sub_url = f"http://{SERVER_IP}:8080/profiles/{client['subId']}.json"
+    sub_url = vless
     app = "happ" if platform in ("iphone", "android") else ""
 
     await db.create_user_device(
@@ -907,7 +907,7 @@ def _admin_device_link_text(platform: str, email: str, sub_id: str,
             "v2RayTun → Subscription → Add → вставить URL → Update subscription → Connect."
         )
     elif platform in ("iphone", "android"):
-        url = f"http://{SERVER_IP}:8080/connect/{sub_id}.html"
+        url = vless_link
         body = (
             f"{label}:\nНажмите — ссылка скопируется автоматически:\n{url}\n\n"
             "v2RayTun → + → «Импорт из буфера обмена» → Connect."
@@ -969,7 +969,7 @@ async def admin_add_self_pick(callback: CallbackQuery):
 
     plat_name = PLATFORM_NAMES.get(platform, platform)
     vless = generate_vless_link(client["id"], f"NetLink-{plat_name}")
-    sub_url = f"http://{SERVER_IP}:8080/profiles/{client['subId']}.json"
+    sub_url = vless
     app = "happ" if platform in ("iphone", "android") else ""
 
     device_id = await db.create_user_device(
