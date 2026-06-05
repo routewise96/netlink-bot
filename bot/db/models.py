@@ -70,6 +70,20 @@ CREATE TABLE IF NOT EXISTS violations (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_violations_email_minute
     ON violations(email, minute_bucket);
+
+CREATE TABLE IF NOT EXISTS recovery_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token TEXT NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used INTEGER DEFAULT 0,
+    ip TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recovery_tokens_token
+    ON recovery_tokens(token);
 """
 
 
