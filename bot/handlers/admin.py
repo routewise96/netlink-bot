@@ -1265,7 +1265,7 @@ async def cb_block_uuid(callback: CallbackQuery):
             await callback.bot.send_message(
                 user_row[0],
                 f"Ваше устройство #{device['device_number']} отключено за нарушение "
-                f"правил (общий доступ к подписке). По вопросам пишите @routewise96.",
+                f"правил (общий доступ к подписке). По вопросам пишите @QuentinCostello.",
             )
         except Exception:
             pass
