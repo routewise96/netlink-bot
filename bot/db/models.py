@@ -57,6 +57,19 @@ CREATE TABLE IF NOT EXISTS ai_conversations (
     escalated INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS violations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    ips_json TEXT NOT NULL,
+    minute_bucket TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    alerted INTEGER DEFAULT 0,
+    ignored INTEGER DEFAULT 0
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_violations_email_minute
+    ON violations(email, minute_bucket);
 """
 
 

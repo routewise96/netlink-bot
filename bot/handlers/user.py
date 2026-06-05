@@ -39,27 +39,36 @@ def _subscription_url(sub_id: str) -> str:
     return f"http://{SERVER_IP}:8080/profiles/{sub_id}.json"
 
 
-UNIVERSAL_INSTRUCTION = """📖 <b>Как подключиться:</b>
+UNIVERSAL_INSTRUCTION = """📲 Подписка для добавления в VPN-клиент:
+<code>{subscription_url}</code>
 
-1. Установи sing-box (или Hiddify для Windows).
-   • iOS: App Store → sing-box
-   • Android: GitHub → SFA (sing-box for Android), или Hiddify
-   • macOS: App Store → sing-box
+📖 Что делать:
+
+1. Установи Hiddify:
+   • iOS: App Store → найди «Hiddify»
+   • Android: Google Play → «Hiddify», или github.com/hiddify/hiddify-app/releases
+   • macOS: App Store → «Hiddify», или hiddify.com
    • Windows: hiddify.com
 
-2. В клиенте: «Добавить подписку» / «Add Profile from URL» → вставь ссылку выше → Save.
+2. В Hiddify нажми «+» → «Добавить профиль» / «Add Profile from URL» → вставь ссылку выше → Save.
 
-3. Подключи VPN. Российские сервисы (Яндекс, Госуслуги, банки) автоматически идут mimo VPN — настраивать ничего не надо.
+3. Подключи VPN.
+
+Российские сервисы (Яндекс, Госуслуги, банки, маркетплейсы) автоматически идут mimo VPN — настраивать ничего не надо.
 
 Если ссылка перестанет работать — напиши админу @routewise96."""
+
+
+def render_subscription_block(sub_id: str) -> str:
+    """Render UNIVERSAL_INSTRUCTION with this device's subscription URL."""
+    return UNIVERSAL_INSTRUCTION.format(subscription_url=_subscription_url(sub_id))
 
 
 def _device_added_text(device_number: int, sub_id: str) -> str:
     """Single new device handed out (approval, add-device, change-platform)."""
     return (
-        f"✅ Устройство #{device_number} добавлено.\n"
-        f"📲 Подписка для добавления в VPN-клиент: <code>{_subscription_url(sub_id)}</code>\n\n"
-        + UNIVERSAL_INSTRUCTION
+        f"✅ Устройство #{device_number} добавлено.\n\n"
+        + render_subscription_block(sub_id)
     )
 
 
@@ -126,7 +135,19 @@ async def show_instruction(callback: CallbackQuery):
         await callback.answer("Доступ не активен", show_alert=True)
         return
 
-    await callback.message.answer(UNIVERSAL_INSTRUCTION, parse_mode="HTML")
+    devices = await db.get_user_devices(callback.from_user.id)
+    active = [d for d in devices if d["status"] == "active"]
+    if not active:
+        await callback.message.answer(
+            "У вас нет активных подписок.",
+            reply_markup=main_menu_kb(),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    for d in active:
+        await callback.message.answer(render_subscription_block(d["sub_id"]), parse_mode="HTML")
     await callback.message.answer(
         "Выберите действие:",
         reply_markup=main_menu_kb(),

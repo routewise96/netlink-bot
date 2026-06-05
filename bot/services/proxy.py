@@ -155,3 +155,26 @@ def update_clients_limit_ip(emails: list[str], limit_ip: int) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def set_client_enabled(email: str, enabled: bool) -> None:
+    """Set enable flag for one client in x-ui DB (kills sharing in flight)."""
+    conn = sqlite3.connect(XUI_DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT id, settings FROM inbounds WHERE id=1"
+        ).fetchone()
+        if not row:
+            return
+        settings = json.loads(row[1])
+        for client in settings.get("clients", []):
+            if client["email"] == email:
+                client["enable"] = enabled
+                break
+        conn.execute(
+            "UPDATE inbounds SET settings = ? WHERE id = ?",
+            (json.dumps(settings), row[0]),
+        )
+        conn.commit()
+    finally:
+        conn.close()

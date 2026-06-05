@@ -12,6 +12,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from bot.db import queries as db
 from bot.services.proxy import (
     get_free_uuids, generate_vless_link, update_clients_limit_ip,
+    set_client_enabled,
 )
 from bot.keyboards.admin_kb import (
     admin_panel_kb,
@@ -20,7 +21,7 @@ from bot.keyboards.admin_kb import (
     back_to_admin_kb,
 )
 from bot.keyboards.user_kb import main_menu_kb, agreement_start_kb
-from bot.handlers.user import _subscription_url, UNIVERSAL_INSTRUCTION
+from bot.handlers.user import _subscription_url, UNIVERSAL_INSTRUCTION, render_subscription_block
 from bot.config import ADMIN_CHAT_ID, SERVER_IP
 
 router = Router()
@@ -45,9 +46,8 @@ if not broadcast_log.handlers:
 def _device_message(device_number: int, sub_id: str) -> str:
     """Universal message for a single newly-handed-out device."""
     return (
-        f"✅ Устройство #{device_number} добавлено.\n"
-        f"📲 Подписка для добавления в VPN-клиент: <code>{_subscription_url(sub_id)}</code>\n\n"
-        + UNIVERSAL_INSTRUCTION
+        f"✅ Устройство #{device_number} добавлено.\n\n"
+        + render_subscription_block(sub_id)
     )
 
 
@@ -186,23 +186,20 @@ async def admin_requests(callback: CallbackQuery):
 
 # ── Approve: per-platform UUID assignment ──
 
-def _build_approval_text(devices_data: list[dict]) -> str:
-    """Multi-device approval message with subscription URLs and universal instruction."""
+def _build_approval_messages(devices_data: list[dict]) -> list[str]:
+    """Header message + per-device rendered subscription/instruction blocks."""
     n = len(devices_data)
     dev_word = "устройство" if n == 1 else "устройства" if n < 5 else "устройств"
-    lines = [
-        f"✅ <b>Доступ одобрен!</b> Вам выданы подписки на {n} {dev_word}.\n",
+    header = (
+        f"✅ <b>Доступ одобрен!</b> Вам выданы подписки на {n} {dev_word}.\n\n"
         "⚠️ Каждая подписка работает строго на <b>ОДНОМ</b> устройстве. "
-        "При использовании на двух устройствах одновременно — подписка блокируется автоматически.\n",
-    ]
-    for dd in devices_data:
+        "При использовании на двух устройствах одновременно — подписка блокируется автоматически."
+    )
+    msgs = [header]
+    for i, dd in enumerate(devices_data, 1):
         label = PLATFORM_LABELS.get(dd["platform"], f"📱 {dd['platform']}")
-        lines.append(
-            f"{label}:\n"
-            f"<code>{_subscription_url(dd['sub_id'])}</code>\n"
-        )
-    lines.append(UNIVERSAL_INSTRUCTION)
-    return "\n".join(lines)
+        msgs.append(f"<b>{label}</b> — устройство #{i}\n\n" + render_subscription_block(dd["sub_id"]))
+    return msgs
 
 
 @router.callback_query(F.data.startswith("approve_"))
@@ -284,7 +281,7 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
             "sub_id": client["subId"],
         })
 
-    user_text = _build_approval_text(devices_data)
+    messages = _build_approval_messages(devices_data)
     emails_str = ", ".join(emails_to_update)
 
     if is_test:
@@ -294,22 +291,30 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
         )
         await callback.bot.send_message(
             telegram_id,
-            "🧪 <b>Тест:</b> " + user_text,
+            "🧪 <b>Тест:</b> " + messages[0],
+            parse_mode="HTML",
+        )
+        for m in messages[1:]:
+            await callback.bot.send_message(telegram_id, m, parse_mode="HTML")
+            await asyncio.sleep(0.3)
+        await callback.bot.send_message(
+            telegram_id,
+            "Выберите действие:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔗 Моя ссылка", callback_data="my_link")],
                 [InlineKeyboardButton(text="📖 Инструкция", callback_data="instruction")],
                 [InlineKeyboardButton(text="⚙️ Мои устройства", callback_data="my_devices")],
                 [InlineKeyboardButton(text="🔙 Выйти из тест-режима", callback_data="exit_test_mode")],
             ]),
-            parse_mode="HTML",
         )
     else:
-        await callback.bot.send_message(
-            telegram_id,
-            user_text,
-            reply_markup=main_menu_kb(),
-            parse_mode="HTML",
-        )
+        for i, m in enumerate(messages):
+            await callback.bot.send_message(
+                telegram_id, m,
+                reply_markup=main_menu_kb() if i == len(messages) - 1 else None,
+                parse_mode="HTML",
+            )
+            await asyncio.sleep(0.3)
         await callback.message.edit_text(
             callback.message.text + f"\n\n✅ Одобрено → {emails_str}",
             parse_mode="HTML",
@@ -871,11 +876,7 @@ def _admin_device_link_text(platform: str, email: str, sub_id: str,
                             vless_link: str, sub_url: str) -> str:
     """Build the link + install instruction block for one admin device."""
     label = PLATFORM_LABELS.get(platform, f"📱 {platform}")
-    return (
-        f"{label}:\n"
-        f"<code>{_subscription_url(sub_id)}</code>\n\n"
-        + UNIVERSAL_INSTRUCTION
-    )
+    return f"<b>{label}</b>\n\n" + render_subscription_block(sub_id)
 
 
 def _admin_add_platform_kb() -> InlineKeyboardMarkup:
@@ -1088,25 +1089,26 @@ async def admin_delete_execute(callback: CallbackQuery):
 
 BROADCAST_TEXT = """Привет! Корпоративный VPN NetLink переехал на новый сервер. Старая ссылка больше не работает.
 
-📲 Твоя новая подписка: <code>{subscription_url}</code>
+📲 Твоя новая подписка:
+<code>{subscription_url}</code>
 
 📖 Как подключить:
 
 1. Удали из своего VPN-клиента старый профиль NetLink.
 
-2. Установи sing-box если ещё не стоит (или Hiddify для Windows):
-   • iOS: App Store → sing-box
-   • Android: GitHub → SFA (sing-box for Android), или Hiddify
-   • macOS: App Store → sing-box
+2. Установи Hiddify (если ещё не стоит):
+   • iOS: App Store → «Hiddify»
+   • Android: Google Play → «Hiddify»
+   • macOS: App Store → «Hiddify», или hiddify.com
    • Windows: hiddify.com
 
-3. Добавь подписку по ссылке выше.
+3. В Hiddify нажми «+» → «Добавить профиль» / «Add Profile from URL» → вставь ссылку выше → Save.
 
-4. Подключайся.
+4. Подключи VPN.
 
-Российские сервисы (Яндекс, Госуслуги, банки, маркетплейсы) теперь работают сами — без переключений и настроек.
+Российские сервисы (Яндекс, Госуслуги, банки, маркетплейсы) работают сами — без настроек.
 
-Если у тебя несколько устройств, для каждого приходит отдельная подписка.
+Если у тебя несколько устройств — для каждого приходит отдельная подписка.
 
 По вопросам пиши @routewise96."""
 
@@ -1208,3 +1210,155 @@ async def _run_broadcast(bot) -> tuple[int, int]:
             await asyncio.sleep(0.5)
     broadcast_log.info("broadcast finished sent=%d errors=%d", sent, errors)
     return sent, errors
+
+
+# ── IP-sharing monitor: block / ignore / list ──
+
+def _violation_kb(device_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚫 Заблокировать UUID",
+                              callback_data=f"block_uuid:{device_id}")],
+        [InlineKeyboardButton(text="✅ Игнорировать",
+                              callback_data=f"ignore_violation:{device_id}")],
+    ])
+
+
+@router.callback_query(F.data.startswith("block_uuid:"))
+async def cb_block_uuid(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    try:
+        device_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+
+    device = await db.get_device(device_id)
+    if not device:
+        await callback.answer("Устройство не найдено", show_alert=True)
+        return
+
+    now = datetime.now().isoformat()
+    from bot.db.models import get_db as _get_db
+    async with _get_db() as conn:
+        await conn.execute(
+            "UPDATE user_devices SET status='banned', banned_at=? WHERE id=?",
+            (now, device_id),
+        )
+        await conn.commit()
+
+    try:
+        set_client_enabled(device["email"], False)
+    except Exception as e:
+        await callback.answer(f"x-ui write failed: {e}", show_alert=True)
+
+    user_row = None
+    async with _get_db() as conn:
+        cursor = await conn.execute(
+            "SELECT telegram_id FROM users WHERE id=?",
+            (device["user_id"],),
+        )
+        user_row = await cursor.fetchone()
+    if user_row:
+        try:
+            await callback.bot.send_message(
+                user_row[0],
+                f"Ваше устройство #{device['device_number']} отключено за нарушение "
+                f"правил (общий доступ к подписке). По вопросам пишите @routewise96.",
+            )
+        except Exception:
+            pass
+
+    try:
+        await callback.message.edit_text(
+            (callback.message.html_text or callback.message.text or "")
+            + "\n\n🚫 <b>Заблокировано админом.</b>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    await callback.answer(f"Заблокировано: {device['email']}")
+
+
+@router.callback_query(F.data.startswith("ignore_violation:"))
+async def cb_ignore_violation(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    try:
+        device_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+
+    device = await db.get_device(device_id)
+    if not device:
+        await callback.answer("Устройство не найдено", show_alert=True)
+        return
+
+    from bot.db.models import get_db as _get_db
+    async with _get_db() as conn:
+        await conn.execute(
+            """UPDATE violations SET ignored=1
+               WHERE email=? AND created_at >= datetime('now','-24 hours')""",
+            (device["email"],),
+        )
+        await conn.commit()
+
+    try:
+        await callback.message.edit_text(
+            (callback.message.html_text or callback.message.text or "")
+            + "\n\n✅ <b>Игнорируется 24 часа.</b>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    await callback.answer(f"Игнор 24ч: {device['email']}")
+
+
+@router.message(Command("violations"))
+async def cmd_violations(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    from bot.db.models import get_db as _get_db
+    async with _get_db() as conn:
+        cursor = await conn.execute(
+            """SELECT v.email,
+                      COUNT(DISTINCT v.minute_bucket) AS windows,
+                      MAX(v.created_at) AS last_seen,
+                      MAX(v.ignored) AS is_ignored,
+                      MAX(v.alerted) AS is_alerted,
+                      ud.id AS device_id, ud.device_number,
+                      u.fio, u.telegram_id
+               FROM violations v
+               LEFT JOIN user_devices ud ON ud.email = v.email
+               LEFT JOIN users u ON u.id = ud.user_id
+               WHERE v.created_at >= datetime('now','-24 hours')
+               GROUP BY v.email
+               ORDER BY windows DESC, last_seen DESC""",
+        )
+        rows = await cursor.fetchall()
+
+    if not rows:
+        await message.answer("📊 За последние 24 часа нарушений не зафиксировано.")
+        return
+
+    await message.answer(
+        f"📊 <b>Нарушения за 24 часа</b> ({len(rows)} email)",
+        parse_mode="HTML",
+    )
+    for r in rows:
+        email, windows, last_seen, is_ignored, is_alerted = r[0], r[1], r[2], r[3], r[4]
+        device_id, device_number, fio, tg_id = r[5], r[6], r[7], r[8]
+        flag = "🛑" if is_ignored else ("🔔" if is_alerted else "•")
+        head = (
+            f"{flag} <b>{fio or '?'}</b> (tg_id {tg_id})\n"
+            f"Email: <code>{email}</code> · устройство #{device_number}\n"
+            f"Окон: <b>{windows}</b> · последнее: {last_seen[:16] if last_seen else '?'}"
+        )
+        if device_id is None:
+            await message.answer(head + "\n\n⚠️ Устройство не найдено в user_devices.",
+                                 parse_mode="HTML")
+            continue
+        await message.answer(head, parse_mode="HTML", reply_markup=_violation_kb(device_id))
