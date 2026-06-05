@@ -1,0 +1,16 @@
+[Unit]
+Description=NetLink subscription server
+After=network.target netlink-bot.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/netlink-bot
+ExecStart=/usr/bin/python3 -m bot.services.profile_server
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/netlink-profile.log
+StandardError=append:/var/log/netlink-profile.log
+
+[Install]
+WantedBy=multi-user.target

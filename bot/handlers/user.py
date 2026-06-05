@@ -11,7 +11,7 @@ from aiogram.types import (
 
 from bot.db import queries as db
 from bot.services import deepseek
-from bot.services.proxy import update_clients_limit_ip, generate_vless_link
+from bot.services.proxy import update_clients_limit_ip
 from bot.keyboards.user_kb import (
     main_menu_kb, back_to_menu_kb, link_and_back_kb, add_device_platforms_kb,
 )
@@ -24,10 +24,10 @@ RATE_LIMIT_MAX = 5
 RATE_LIMIT_WINDOW = 60
 
 PLATFORM_LABELS = {
-    "iphone": "📱 iPhone (Happ)",
-    "android": "📱 Android (Happ)",
-    "windows": "💻 Windows (Hiddify)",
-    "macos": "🖥 macOS (sing-box VT)",
+    "iphone": "📱 iPhone",
+    "android": "📱 Android",
+    "windows": "💻 Windows",
+    "macos": "🖥 macOS",
 }
 
 
@@ -35,33 +35,40 @@ class AskQuestion(StatesGroup):
     waiting_question = State()
 
 
-ROUTING_DONE = (
-    "✅ Теперь не нужно отключать сервис для использования российских "
-    "приложений — Сбербанк, Яндекс, Госуслуги и другие работают без переключений.\n"
-)
+def _subscription_url(sub_id: str) -> str:
+    return f"http://{SERVER_IP}:8080/profiles/{sub_id}.json"
 
 
-def _routing_text() -> str:
-    """Build routing instruction block for mobile platforms."""
+UNIVERSAL_INSTRUCTION = """📖 <b>Как подключиться:</b>
+
+1. Установи sing-box (или Hiddify для Windows).
+   • iOS: App Store → sing-box
+   • Android: GitHub → SFA (sing-box for Android), или Hiddify
+   • macOS: App Store → sing-box
+   • Windows: hiddify.com
+
+2. В клиенте: «Добавить подписку» / «Add Profile from URL» → вставь ссылку выше → Save.
+
+3. Подключи VPN. Российские сервисы (Яндекс, Госуслуги, банки) автоматически идут mimo VPN — настраивать ничего не надо.
+
+Если ссылка перестанет работать — напиши админу @routewise96."""
+
+
+def _device_added_text(device_number: int, sub_id: str) -> str:
+    """Single new device handed out (approval, add-device, change-platform)."""
     return (
-        f"🔧 <b>Настройка маршрутизации (один раз):</b>\n"
-        f"Нажмите ссылку ниже — Happ импортирует правила:\n"
-        f"http://{SERVER_IP}:8080/route.html\n\n"
-        + ROUTING_DONE
+        f"✅ Устройство #{device_number} добавлено.\n"
+        f"📲 Подписка для добавления в VPN-клиент: <code>{_subscription_url(sub_id)}</code>\n\n"
+        + UNIVERSAL_INSTRUCTION
     )
 
 
-def _connect_url(sub_id: str) -> str:
-    """Build connect redirect URL for a device."""
-    return f"http://{SERVER_IP}:8080/connect/{sub_id}.html"
-
-
 def _build_devices_text(devices: list[dict]) -> str:
-    """Build per-device links message with platform labels."""
-    lines = ["🔗 <b>Ваши ссылки для подключения:</b>\n"]
+    """List view: all devices with their subscription URLs."""
+    lines = ["🔗 <b>Ваши подписки:</b>\n"]
     lines.append(
-        "⚠️ Каждая ссылка работает строго на <b>ОДНОМ</b> устройстве. "
-        "При использовании на двух устройствах одновременно — ссылка блокируется автоматически.\n"
+        "⚠️ Каждая подписка работает строго на <b>ОДНОМ</b> устройстве. "
+        "При использовании на двух устройствах одновременно — подписка блокируется автоматически.\n"
     )
 
     for d in devices:
@@ -74,74 +81,11 @@ def _build_devices_text(devices: list[dict]) -> str:
 
         lines.append(
             f"{label}:\n"
-            f"<code>{generate_vless_link(d['uuid'], label)}</code>\n"
-            f"Скопируйте ссылку и добавьте в ваш VPN-клиент.\n"
+            f"<code>{_subscription_url(d['sub_id'])}</code>\n"
         )
 
     lines.append("Нажмите 📖 Инструкция для пошаговой настройки.")
     return "\n".join(lines)
-
-
-HAPP_ROUTING_INSTRUCTION = f"""
-🔧 <b>Шаг 2 — Маршрутизация (один раз):</b>
-
-Нажмите ссылку ниже — Happ импортирует правила:
-http://{SERVER_IP}:8080/route.html
-
-✅ Теперь не нужно отключать сервис для использования российских приложений — Сбербанк, Яндекс, Госуслуги и другие работают без переключений."""
-
-INSTRUCTIONS = {
-    "iphone": """📱 <b>Установка на iPhone (Happ)</b>
-
-<b>Шаг 1 — Подключение:</b>
-1. Откройте App Store → найдите "Happ - Proxy Utility" → скачайте
-2. Вернитесь в этот чат → нажмите на ссылку выше
-3. Ссылка скопируется автоматически
-4. Откройте Happ → нажмите "+" → "Из буфера обмена"
-5. Нажмите кнопку подключения
-
-✅ Готово!
-""" + HAPP_ROUTING_INSTRUCTION,
-
-    "android": """📱 <b>Установка на Android (Happ)</b>
-
-<b>Шаг 1 — Подключение:</b>
-1. Откройте Google Play → найдите "Happ - Proxy Utility" → скачайте
-2. Вернитесь в этот чат → нажмите на ссылку выше
-3. Ссылка скопируется автоматически
-4. Откройте Happ → нажмите "+" → "Из буфера обмена"
-5. Нажмите кнопку подключения
-
-✅ Готово!
-""" + HAPP_ROUTING_INSTRUCTION,
-
-    "windows": """💻 <b>Установка на Windows (Hiddify)</b>
-
-1. Скачайте Hiddify: https://hiddify.com
-2. Установите и запустите
-3. Нажмите "+" → "Добавить из буфера обмена"
-4. Скопируйте вашу ссылку (vless://...) выше
-5. Вставьте — профиль добавится
-6. Нажмите "Подключить"
-
-⚠️ ВАЖНО: Зайдите в Настройки → отключите "Блокировать рекламу". Без этого не будут работать Яндекс Карты, Такси и другие сервисы Яндекса.
-
-✅ Готово!""",
-
-    "macos": """🖥 <b>Установка на macOS (sing-box VT)</b>
-
-1. Откройте App Store → найдите "sing-box VT"
-2. Скачайте и откройте
-3. Перейдите в Profiles → New Profile
-4. Type: выберите Remote
-5. Name: NetLink
-6. URL: вставьте ссылку подписки для macOS выше
-7. Нажмите Create
-8. Перейдите в Dashboard → выберите профиль → нажмите ▶
-9. Разрешите добавление VPN-конфигурации если попросит
-
-✅ Маршрутизация уже настроена в профиле — российские приложения работают автоматически.""",
-}
 
 
 @router.callback_query(F.data == "back_menu")
@@ -182,30 +126,7 @@ async def show_instruction(callback: CallbackQuery):
         await callback.answer("Доступ не активен", show_alert=True)
         return
 
-    devices = await db.get_user_devices(callback.from_user.id)
-    if devices:
-        platforms = [d["platform"] for d in devices if d.get("platform")]
-    else:
-        platforms = json.loads(user["platforms"] or "[]")
-
-    texts = []
-    seen = set()
-    for p in platforms:
-        if p in seen:
-            continue
-        seen.add(p)
-        if p in INSTRUCTIONS:
-            texts.append(INSTRUCTIONS[p])
-
-    if not texts:
-        texts.append("Инструкции для ваших платформ не найдены.")
-
-    full_text = "\n\n".join(texts)
-    if len(full_text) > 4000:
-        for text in texts:
-            await callback.message.answer(text, parse_mode="HTML")
-    else:
-        await callback.message.answer(full_text, parse_mode="HTML")
+    await callback.message.answer(UNIVERSAL_INSTRUCTION, parse_mode="HTML")
     await callback.message.answer(
         "Выберите действие:",
         reply_markup=main_menu_kb(),
@@ -440,20 +361,11 @@ PLATFORM_SHORT = {
 
 
 def _build_single_device_link(device: dict) -> str:
-    """Build link block for a single device based on its platform."""
-    platform = device.get("platform", "")
-    label = PLATFORM_LABELS.get(platform, f"Устройство {device['device_number']}")
-    sub_id = device.get("sub_id", "")
-    if platform == "macos":
-        return f"{label}:\n<code>{device.get('subscription_url', '')}</code>"
-    elif platform in ("iphone", "android") and sub_id:
-        return (
-            f"{label}:\n"
-            f"Нажмите — ссылка скопируется автоматически:\n"
-            f"{_connect_url(sub_id)}"
-        )
-    else:
-        return f"{label}:\n<code>{device.get('vless_link', '')}</code>"
+    """Build link block for a single device."""
+    label = PLATFORM_LABELS.get(
+        device.get("platform", ""), f"Устройство {device['device_number']}"
+    )
+    return f"{label}:\n<code>{_subscription_url(device['sub_id'])}</code>"
 
 
 @router.callback_query(F.data == "change_platform")
@@ -589,12 +501,11 @@ async def change_platform_apply(callback: CallbackQuery):
     updated = await db.get_device(device_id)
     plat_name = PLATFORM_DISPLAY.get(new_platform, new_platform)
     link_block = _build_single_device_link(updated)
-    instruction = INSTRUCTIONS.get(new_platform, "")
 
     msg = (
         f"✅ <b>Платформа устройства {updated['device_number']} изменена на {plat_name}</b>\n\n"
         f"{link_block}\n\n"
-        f"{instruction}"
+        f"{UNIVERSAL_INSTRUCTION}"
     )
     await callback.message.answer(msg, reply_markup=back_to_menu_kb(), parse_mode="HTML")
     await callback.answer(f"Платформа: {plat_name}")

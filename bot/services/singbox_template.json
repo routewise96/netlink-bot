@@ -1,0 +1,128 @@
+{
+  "log": {"level": "info", "timestamp": true},
+  "dns": {
+    "servers": [
+      {"tag": "bootstrap-dns", "address": "77.88.8.8", "detour": "direct"},
+      {"tag": "proxy-dns", "address": "tls://1.1.1.1", "detour": "proxy"},
+      {"tag": "local-dns", "address": "local", "detour": "direct"},
+      {"tag": "block-dns", "address": "rcode://success"}
+    ],
+    "rules": [
+      {"outbound": "any", "server": "bootstrap-dns"},
+      {
+        "domain_suffix": [
+          "yandex.ru","yandex.net","yandex.com","ya.ru","yandex-team.ru",
+          "yango.com","yastatic.net","yastat.net","yandex.cloud",
+          "sberbank.ru","sbol.ru","online.sberbank.ru",
+          "tinkoff.ru","tbank.ru","vtb.ru","vtb-online.ru",
+          "alfabank.ru","alfaclick.ru",
+          "wildberries.ru","wb.ru","wbstatic.net",
+          "ozon.ru","ozon.travel","ozonusercontent.com",
+          "avito.ru","avito.st",
+          "megamarket.ru","sbermegamarket.ru","samokat.ru",
+          "2gis.ru","2gis.com",
+          "kinopoisk.ru","hd.kinopoisk.ru","rutube.ru",
+          "max.ru","vkvideo.ru","vk.com","vk.ru","vkontakte.ru",
+          "vkuserid.com","vkcdn.me","ok.ru","odnoklassniki.ru",
+          "mail.ru","mycdn.me",
+          "mts.ru","login.mts.ru","megafon.ru",
+          "gosuslugi.ru","esia.gosuslugi.ru",
+          "mir-platform.ru","nspk.ru","rustore.ru"
+        ],
+        "server": "local-dns"
+      },
+      {"clash_mode": "Direct", "server": "local-dns"},
+      {"clash_mode": "Global", "server": "proxy-dns"}
+    ],
+    "final": "proxy-dns",
+    "strategy": "prefer_ipv4"
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 2080,
+      "sniff": true,
+      "sniff_override_destination": true
+    },
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "inet4_address": "172.19.0.1/30",
+      "auto_route": true,
+      "strict_route": true,
+      "stack": "system",
+      "sniff": true,
+      "sniff_override_destination": true
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "{{SERVER_IP}}",
+      "server_port": 443,
+      "uuid": "{{UUID}}",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "{{SNI}}",
+        "utls": {"enabled": true, "fingerprint": "{{FP}}"},
+        "reality": {
+          "enabled": true,
+          "public_key": "{{PUBLIC_KEY}}",
+          "short_id": "{{SHORT_ID}}"
+        }
+      },
+      "packet_encoding": "xudp"
+    },
+    {"type": "direct", "tag": "direct"},
+    {"type": "block", "tag": "block"},
+    {"type": "dns", "tag": "dns-out"}
+  ],
+  "route": {
+    "rules": [
+      {"protocol": "dns", "outbound": "dns-out"},
+      {"ip_is_private": true, "outbound": "direct"},
+      {"domain": ["{{SNI}}"], "outbound": "direct"},
+      {
+        "domain_suffix": [
+          "yandex.ru","yandex.net","yandex.com","ya.ru","yandex-team.ru",
+          "yango.com","yastatic.net","yastat.net","yandex.cloud",
+          "sberbank.ru","sbol.ru","online.sberbank.ru",
+          "tinkoff.ru","tbank.ru","vtb.ru","vtb-online.ru",
+          "alfabank.ru","alfaclick.ru",
+          "wildberries.ru","wb.ru","wbstatic.net",
+          "ozon.ru","ozon.travel","ozonusercontent.com",
+          "avito.ru","avito.st",
+          "megamarket.ru","sbermegamarket.ru","samokat.ru",
+          "2gis.ru","2gis.com",
+          "kinopoisk.ru","hd.kinopoisk.ru","rutube.ru",
+          "max.ru","vkvideo.ru","vk.com","vk.ru","vkontakte.ru",
+          "vkuserid.com","vkcdn.me","ok.ru","odnoklassniki.ru",
+          "mail.ru","mycdn.me",
+          "mts.ru","login.mts.ru","megafon.ru",
+          "gosuslugi.ru","esia.gosuslugi.ru",
+          "mir-platform.ru","nspk.ru","rustore.ru"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "ip_cidr": [
+          "5.45.192.0/18","5.255.192.0/18","77.88.0.0/18",
+          "87.250.224.0/19","93.158.128.0/18","95.108.128.0/17",
+          "141.8.128.0/18","178.154.128.0/17","213.180.192.0/19",
+          "2a02:6b8::/32","2620:10f:d000::/44",
+          "100.43.64.0/19","199.21.96.0/22","199.36.240.0/22"
+        ],
+        "outbound": "direct"
+      }
+    ],
+    "final": "proxy",
+    "auto_detect_interface": true
+  },
+  "experimental": {
+    "cache_file": {"enabled": true}
+  }
+}

@@ -1,5 +1,7 @@
 """Admin panel: approve/reject, per-device management, stats."""
+import asyncio
 import json
+import logging
 from datetime import datetime
 
 from aiogram import Router, F
@@ -18,17 +20,35 @@ from bot.keyboards.admin_kb import (
     back_to_admin_kb,
 )
 from bot.keyboards.user_kb import main_menu_kb, agreement_start_kb
+from bot.handlers.user import _subscription_url, UNIVERSAL_INSTRUCTION
 from bot.config import ADMIN_CHAT_ID, SERVER_IP
 
 router = Router()
 
 PLATFORM_LABELS = {
-    "iphone": "📱 iPhone (Happ)",
-    "android": "📱 Android (Happ)",
-    "windows": "💻 Windows (Hiddify)",
-    "macos": "🖥 macOS (sing-box VT)",
+    "iphone": "📱 iPhone",
+    "android": "📱 Android",
+    "windows": "💻 Windows",
+    "macos": "🖥 macOS",
 }
 PLATFORM_NAMES = {"iphone": "iPhone", "android": "Android", "windows": "Windows", "macos": "macOS"}
+
+broadcast_log = logging.getLogger("netlink.broadcast")
+if not broadcast_log.handlers:
+    _bcast_h = logging.FileHandler("/var/log/netlink-bot-broadcast.log")
+    _bcast_h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    broadcast_log.addHandler(_bcast_h)
+    broadcast_log.setLevel(logging.INFO)
+    broadcast_log.propagate = False
+
+
+def _device_message(device_number: int, sub_id: str) -> str:
+    """Universal message for a single newly-handed-out device."""
+    return (
+        f"✅ Устройство #{device_number} добавлено.\n"
+        f"📲 Подписка для добавления в VPN-клиент: <code>{_subscription_url(sub_id)}</code>\n\n"
+        + UNIVERSAL_INSTRUCTION
+    )
 
 
 def is_admin(user_id: int) -> bool:
@@ -166,59 +186,22 @@ async def admin_requests(callback: CallbackQuery):
 
 # ── Approve: per-platform UUID assignment ──
 
-def _build_device_link_block(dd: dict) -> str:
-    """Single-device rendered link block for approval / add-device messages."""
-    platform = dd["platform"]
-    label = PLATFORM_LABELS.get(platform, f"📱 {platform}")
-    if platform == "macos":
-        return f"{label}:\n<code>{dd['sub_url']}</code>\n"
-    elif platform in ("iphone", "android") and dd.get("sub_id"):
-        url = dd["vless"]
-        return (
-            f"{label}:\n"
-            f"Скопируйте ссылку и добавьте в ваш VPN-клиент:\n"
-            f"<code>{url}</code>\n"
-        )
-    else:
-        return f"{label}:\n<code>{dd['vless']}</code>\n"
-
-
 def _build_approval_text(devices_data: list[dict]) -> str:
-    """Build per-platform links text for approval message."""
+    """Multi-device approval message with subscription URLs and universal instruction."""
     n = len(devices_data)
-    dev_word = "устройство" if n == 1 else "устройства"
+    dev_word = "устройство" if n == 1 else "устройства" if n < 5 else "устройств"
     lines = [
-        f"✅ <b>Доступ одобрен!</b> Вам выданы ссылки на {n} {dev_word}.\n",
-        "⚠️ Каждая ссылка работает строго на <b>ОДНОМ</b> устройстве. "
-        "При использовании на двух устройствах одновременно — ссылка блокируется автоматически.\n",
+        f"✅ <b>Доступ одобрен!</b> Вам выданы подписки на {n} {dev_word}.\n",
+        "⚠️ Каждая подписка работает строго на <b>ОДНОМ</b> устройстве. "
+        "При использовании на двух устройствах одновременно — подписка блокируется автоматически.\n",
     ]
-
-    has_mobile = False
     for dd in devices_data:
-        platform = dd["platform"]
-        label = PLATFORM_LABELS.get(platform, f"📱 {platform}")
-        if platform == "macos":
-            lines.append(f"{label}:\n<code>{dd['sub_url']}</code>\n")
-        elif platform in ("iphone", "android") and dd.get("sub_id"):
-            url = dd["vless"]
-            lines.append(
-                f"{label}:\n"
-                f"Скопируйте ссылку и добавьте в ваш VPN-клиент:\n"
-                f"<code>{url}</code>\n"
-            )
-            has_mobile = True
-        else:
-            lines.append(f"{label}:\n<code>{dd['vless']}</code>\n")
-
-    if has_mobile:
+        label = PLATFORM_LABELS.get(dd["platform"], f"📱 {dd['platform']}")
         lines.append(
-            f"🔧 <b>Настройка маршрутизации (один раз):</b>\n"
-            f"Нажмите ссылку ниже — Happ импортирует правила:\n"
-            f"http://{SERVER_IP}:8080/route.html\n\n"
-            "✅ Теперь не нужно отключать сервис для использования российских "
-            "приложений — Сбербанк, Яндекс, Госуслуги и другие работают без переключений.\n"
+            f"{label}:\n"
+            f"<code>{_subscription_url(dd['sub_id'])}</code>\n"
         )
-
+    lines.append(UNIVERSAL_INSTRUCTION)
     return "\n".join(lines)
 
 
@@ -282,7 +265,7 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
     for i, (client, platform) in enumerate(zip(assigned, platforms), 1):
         plat_name = PLATFORM_NAMES.get(platform, str(i))
         vless = generate_vless_link(client["id"], f"NetLink-{plat_name}")
-        sub_url = vless
+        sub_url = _subscription_url(client["subId"])
         app = "happ" if platform in ("android", "iphone") else ""
         await db.create_user_device(
             user_id=user_id,
@@ -605,20 +588,14 @@ async def show_user_link(callback: CallbackQuery):
         await callback.answer("Ссылки не найдены", show_alert=True)
         return
 
-    lines = [f"🔗 <b>Ссылки {user['fio']}:</b>\n"]
+    lines = [f"🔗 <b>Подписки {user['fio']}:</b>\n"]
     for d in devices:
         platform = d.get("platform", "")
         label = PLATFORM_LABELS.get(platform, f"Устройство {d['device_number']}")
         status = "✅" if d["status"] == "active" else "🔴"
         lines.append(f"{label} {status} ({d['email']}):")
         if d["status"] == "active":
-            if platform == "macos":
-                lines.append(f"<code>{d.get('subscription_url', '')}</code>")
-            elif platform in ("iphone", "android") and d.get("sub_id"):
-                url = d.get("vless_link", "")
-                lines.append(f"<code>{url}</code>")
-            else:
-                lines.append(f"<code>{d.get('vless_link', '')}</code>")
+            lines.append(f"<code>{_subscription_url(d['sub_id'])}</code>")
         else:
             lines.append("(заблокировано)")
         lines.append("")
@@ -741,7 +718,7 @@ async def add_device_approve(callback: CallbackQuery):
     next_num = max([d["device_number"] for d in existing], default=0) + 1
     plat_name = PLATFORM_NAMES.get(platform, str(next_num))
     vless = generate_vless_link(client["id"], f"NetLink-{plat_name}")
-    sub_url = vless
+    sub_url = _subscription_url(client["subId"])
     app = "happ" if platform in ("iphone", "android") else ""
 
     await db.create_user_device(
@@ -759,17 +736,10 @@ async def add_device_approve(callback: CallbackQuery):
     now = datetime.now().isoformat()
     await db.update_request(request_id, status="approved", resolved_at=now)
 
-    dd = {
-        "platform": platform,
-        "email": client["email"],
-        "vless": vless,
-        "sub_url": sub_url,
-        "sub_id": client["subId"],
-    }
     user_text = (
         f"✅ <b>Доп. устройство одобрено!</b>\n\n"
-        f"{_build_device_link_block(dd)}\n"
-        f"⚠️ Ссылка работает строго на <b>ОДНОМ</b> устройстве. "
+        f"{_device_message(next_num, client['subId'])}\n\n"
+        f"⚠️ Подписка работает строго на <b>ОДНОМ</b> устройстве. "
         f"При использовании на двух устройствах одновременно — блокируется автоматически."
     )
     try:
@@ -901,23 +871,11 @@ def _admin_device_link_text(platform: str, email: str, sub_id: str,
                             vless_link: str, sub_url: str) -> str:
     """Build the link + install instruction block for one admin device."""
     label = PLATFORM_LABELS.get(platform, f"📱 {platform}")
-    if platform == "macos":
-        body = (
-            f"{label}:\n<code>{sub_url}</code>\n\n"
-            "v2RayTun → Subscription → Add → вставить URL → Update subscription → Connect."
-        )
-    elif platform in ("iphone", "android"):
-        url = vless_link
-        body = (
-            f"{label}:\nСкопируйте ссылку и добавьте в ваш VPN-клиент:\n<code>{url}</code>\n\n"
-            "v2RayTun → + → «Импорт из буфера обмена» → Connect."
-        )
-    else:  # windows
-        body = (
-            f"{label}:\n<code>{vless_link}</code>\n\n"
-            "v2rayN → Import → From clipboard → Connect."
-        )
-    return body
+    return (
+        f"{label}:\n"
+        f"<code>{_subscription_url(sub_id)}</code>\n\n"
+        + UNIVERSAL_INSTRUCTION
+    )
 
 
 def _admin_add_platform_kb() -> InlineKeyboardMarkup:
@@ -969,7 +927,7 @@ async def admin_add_self_pick(callback: CallbackQuery):
 
     plat_name = PLATFORM_NAMES.get(platform, platform)
     vless = generate_vless_link(client["id"], f"NetLink-{plat_name}")
-    sub_url = vless
+    sub_url = _subscription_url(client["subId"])
     app = "happ" if platform in ("iphone", "android") else ""
 
     device_id = await db.create_user_device(
@@ -1124,3 +1082,129 @@ async def admin_delete_execute(callback: CallbackQuery):
     callback.data = "admin_my_devices"
     await admin_my_devices_list(callback)
     await callback.answer(f"Удалено: {email}")
+
+
+# ── Broadcast: notify all active users about the server migration ──
+
+BROADCAST_TEXT = """Привет! Корпоративный VPN NetLink переехал на новый сервер. Старая ссылка больше не работает.
+
+📲 Твоя новая подписка: <code>{subscription_url}</code>
+
+📖 Как подключить:
+
+1. Удали из своего VPN-клиента старый профиль NetLink.
+
+2. Установи sing-box если ещё не стоит (или Hiddify для Windows):
+   • iOS: App Store → sing-box
+   • Android: GitHub → SFA (sing-box for Android), или Hiddify
+   • macOS: App Store → sing-box
+   • Windows: hiddify.com
+
+3. Добавь подписку по ссылке выше.
+
+4. Подключайся.
+
+Российские сервисы (Яндекс, Госуслуги, банки, маркетплейсы) теперь работают сами — без переключений и настроек.
+
+Если у тебя несколько устройств, для каждого приходит отдельная подписка.
+
+По вопросам пиши @routewise96."""
+
+
+async def _count_broadcast_targets() -> tuple[int, int]:
+    users = await db.get_users_by_status("approved")
+    user_count = 0
+    device_count = 0
+    for u in users:
+        devices = await db.get_user_devices(u["telegram_id"])
+        active = [d for d in devices if d["status"] == "active"]
+        if active:
+            user_count += 1
+            device_count += len(active)
+    return user_count, device_count
+
+
+@router.message(Command("broadcast_new_subscription"))
+async def cmd_broadcast_new_subscription(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    user_count, device_count = await _count_broadcast_targets()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"✅ Разослать всем {user_count} пользователям ({device_count} устройств)?",
+            callback_data="broadcast_confirm",
+        )],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")],
+    ])
+    await message.answer(
+        f"⚠️ <b>Массовая рассылка о переезде на новый сервер</b>\n\n"
+        f"Пользователей с активными устройствами: <b>{user_count}</b>\n"
+        f"Отдельных сообщений (по устройствам): <b>{device_count}</b>\n\n"
+        f"Между отправками задержка 0.5 сек. Логи: <code>/var/log/netlink-bot-broadcast.log</code>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "broadcast_cancel")
+async def cb_broadcast_cancel(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.message.edit_text("❌ Рассылка отменена.", parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "broadcast_confirm")
+async def cb_broadcast_confirm(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.message.edit_text(
+        "⏳ Рассылка запущена. Отчёт придёт в этот чат по завершении.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+    asyncio.create_task(_broadcast_and_report(callback.bot, callback.from_user.id))
+
+
+async def _broadcast_and_report(bot, admin_id: int) -> None:
+    try:
+        sent, errors = await _run_broadcast(bot)
+        await bot.send_message(
+            admin_id,
+            f"✅ Рассылка завершена.\n\n"
+            f"Отправлено: <b>{sent}</b>, ошибок: <b>{errors}</b> "
+            f"(детали в <code>/var/log/netlink-bot-broadcast.log</code>)",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        broadcast_log.exception("broadcast crashed")
+        await bot.send_message(admin_id, f"❌ Ошибка рассылки: {e}")
+
+
+async def _run_broadcast(bot) -> tuple[int, int]:
+    sent = 0
+    errors = 0
+    users = await db.get_users_by_status("approved")
+    for u in users:
+        devices = await db.get_user_devices(u["telegram_id"])
+        active = [d for d in devices if d["status"] == "active"]
+        for d in active:
+            text = BROADCAST_TEXT.format(subscription_url=_subscription_url(d["sub_id"]))
+            try:
+                await bot.send_message(u["telegram_id"], text, parse_mode="HTML")
+                sent += 1
+                broadcast_log.info(
+                    "sent tg_id=%s device_id=%s sub_id=%s",
+                    u["telegram_id"], d["id"], d["sub_id"],
+                )
+            except Exception as e:
+                errors += 1
+                broadcast_log.error(
+                    "failed tg_id=%s device_id=%s sub_id=%s err=%s",
+                    u["telegram_id"], d["id"], d["sub_id"], e,
+                )
+            await asyncio.sleep(0.5)
+    broadcast_log.info("broadcast finished sent=%d errors=%d", sent, errors)
+    return sent, errors

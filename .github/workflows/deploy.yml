@@ -37,12 +37,28 @@ jobs:
             git reset --hard origin/main
 
             pip install -r requirements.txt -q --break-system-packages
+
+            # Install/refresh subscription server systemd unit
+            install -m 644 deploy/netlink-profile.service /etc/systemd/system/netlink-profile.service
+            systemctl daemon-reload
+            systemctl enable netlink-profile.service >/dev/null
+
+            # Open subscription port (idempotent)
+            ufw allow 8080/tcp >/dev/null 2>&1 || true
+
             systemctl restart netlink-bot
+            systemctl restart netlink-profile
             sleep 5
             if ! systemctl is-active --quiet netlink-bot; then
               echo "❌ Bot is not running after deploy"
               journalctl -u netlink-bot -n 30 --no-pager
               exit 1
             fi
-            echo "✅ Bot is running"
+            if ! systemctl is-active --quiet netlink-profile; then
+              echo "❌ Profile server is not running after deploy"
+              journalctl -u netlink-profile -n 30 --no-pager
+              exit 1
+            fi
+            echo "✅ Bot and profile server are running"
             journalctl -u netlink-bot -n 5 --no-pager
+            journalctl -u netlink-profile -n 5 --no-pager
