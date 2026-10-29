@@ -490,6 +490,27 @@ class TestXrayLogrotateHourlyUnits(unittest.TestCase):
         self.assertIsNone(re.search(r"^\s*size\s+\S+", cfg, re.MULTILINE))
 
 
+class TestWorkflowNoPipefailTraps(unittest.TestCase):
+    """Regression for run 40888505148: `cmd | grep -q ...` under `set -o pipefail`.
+
+    grep -q exits on first match -> upstream producer can get SIGPIPE (141)
+    -> pipeline fails despite the check succeeding -> false ABORT on a valid
+    state. The stabilize workflow must not contain piped grep -q/-qw/-qx
+    inside its SSH script (here-string grep without a producer pipe is fine).
+    """
+
+    PIPE_GREP_Q = re.compile(r"\|\s*grep\s+-\w*q")
+
+    def test_stabilize_has_no_piped_grep_q(self):
+        raw = (WORKFLOWS / "stabilize-legacy.yml").read_text()
+        offenders = [line.strip() for line in raw.splitlines()
+                     if self.PIPE_GREP_Q.search(line)]
+        self.assertEqual(
+            offenders, [],
+            "piped grep -q* found in stabilize workflow (pipefail+SIGPIPE "
+            "false-failure risk):\n" + "\n".join(offenders))
+
+
 class TestWorkflowsStatic(unittest.TestCase):
     @staticmethod
     def load(name):
