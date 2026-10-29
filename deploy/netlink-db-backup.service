@@ -1,0 +1,12 @@
+[Unit]
+Description=NetLink database consistent backup
+After=network.target netlink-bot.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/netlink-bot
+Environment=NETLINK_DB_PATH=/opt/netlink-bot/netlink.db
+Environment=NETLINK_BACKUP_DIR=/var/backups/netlink
+Environment=NETLINK_BACKUP_KEEP=14
+ExecStart=/usr/bin/python3 /opt/netlink-bot/scripts/netlink_db_backup.py

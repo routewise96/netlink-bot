@@ -1,0 +1,182 @@
+name: Stabilize legacy NetLink (manual)
+
+# Manual-only production hardening for the legacy VPS:
+#   - Xray loglevel -> warning (changes 3x-ui source of truth, restarts x-ui)
+#   - xray logrotate policy (daily + maxsize 100M, rotate 7)
+#   - 2 GiB swap + vm.swappiness=10
+#   - journald limits (256M/64M/14day) + vacuum
+#   - netlink.db backup units + first verified backup
+#
+# This is the ONLY place where hardening artifacts of this PR are applied.
+# The regular deploy workflow intentionally does NOT install them
+# (merge must not equal rollout).
+#
+# Safety:
+#   - workflow_dispatch ONLY (never on push)
+#   - requires typing the confirmation word
+#   - verifies hostname + server IP on the remote side before any change
+#   - timestamped backups of everything it touches (rollback pointer on ERR)
+#   - idempotent: safe to re-run
+#   - never reboots the server
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "stabilize" to confirm'
+        required: true
+        default: ''
+
+jobs:
+  stabilize:
+    if: github.event.inputs.confirm == 'stabilize'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight gates (local)
+        run: |
+          set -euo pipefail
+          echo "ref: ${GITHUB_REF}"
+          test -f scripts/set_xray_loglevel.py
+          test -f scripts/setup_swap.sh
+          test -f scripts/install_journald_limits.sh
+          test -f scripts/netlink_db_backup.py
+          test -f scripts/verify_backup.sh
+          test -f deploy/xray-logs
+          test -f deploy/netlink-xray-logrotate.service
+          test -f deploy/netlink-xray-logrotate.timer
+          test -f deploy/netlink-db-backup.service
+          test -f deploy/netlink-db-backup.timer
+          echo "local preflight OK"
+
+      - name: Apply hardening over SSH (idempotent, gated)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 153.75.85.138
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22847
+          script: |
+            set -euo pipefail
+            EXPECTED_HOSTNAME="ubuntu-Amsterdam-2gb"
+            EXPECTED_IP="153.75.85.138"
+            SNAP="/root/netlink-stabilize-backups/pending"
+            trap 'echo "STABILIZE FAILED (partial state possible). Rollback material: $SNAP ; runbook: docs/LEGACY_HARDENING.md"' ERR
+
+            echo "=== GATE 1: identity ==="
+            ACTUAL_HOSTNAME="$(hostname)"
+            echo "hostname: $ACTUAL_HOSTNAME"
+            [ "$ACTUAL_HOSTNAME" = "$EXPECTED_HOSTNAME" ] || { echo "ABORT: hostname mismatch"; exit 20; }
+            ip -4 addr show | grep -qw "$EXPECTED_IP" || { echo "ABORT: expected IP not present on interfaces"; exit 21; }
+            ACTUAL_EGRESS="$(curl -s --max-time 10 https://api.ipify.org || true)"
+            echo "egress ip present: $([ -n "$ACTUAL_EGRESS" ] && echo yes || echo no)"
+            [ "$ACTUAL_EGRESS" = "$EXPECTED_IP" ] || { echo "ABORT: egress IP mismatch"; exit 22; }
+            echo "identity OK"
+
+            echo "=== GATE 2: code sync via official deploy channel ==="
+            cd /opt/netlink-bot
+            if [ ! -d .git ]; then echo "ABORT: /opt/netlink-bot is not a git checkout"; exit 23; fi
+            git fetch origin main
+            git reset --hard origin/main
+            git log --oneline -1
+
+            echo "=== GATE 3: timestamped backup of everything touched ==="
+            TS="$(date +%Y%m%d-%H%M%S)"
+            SNAP="/root/netlink-stabilize-backups/$TS"
+            mkdir -p "$SNAP"
+            chmod 0700 "$SNAP"
+            sqlite3 /etc/x-ui/x-ui.db ".backup '$SNAP/x-ui.db'"
+            if [ -f /etc/logrotate.d/xray ]; then cp -a /etc/logrotate.d/xray "$SNAP/logrotate.xray"; fi
+            cp -a /etc/fstab "$SNAP/fstab"
+            if [ -d /etc/systemd/journald.conf.d ]; then cp -a /etc/systemd/journald.conf.d "$SNAP/journald.conf.d"; fi
+            free -h > "$SNAP/free.txt"; df -h / > "$SNAP/df.txt"
+            swapon --show > "$SNAP/swapon.txt" 2>/dev/null || true
+            ls -la "$SNAP"
+
+            echo "=== STEP 1: xray logrotate policy + hourly maxsize enforcement ==="
+            install -m 644 /opt/netlink-bot/deploy/xray-logs /etc/logrotate.d/xray
+            logrotate -s /tmp/netlink-stabilize-state -d /etc/logrotate.d/xray 2>&1 | grep -q "rotating pattern" \
+              || { echo "ABORT: logrotate config failed validation"; exit 24; }
+            echo "logrotate policy installed and validated"
+            # daily stays the base policy; the hourly unit enforces maxsize 100M
+            # between daily runs. Installed ONLY here (manual), not by deploy.yml.
+            install -m 644 /opt/netlink-bot/deploy/netlink-xray-logrotate.service /etc/systemd/system/netlink-xray-logrotate.service
+            install -m 644 /opt/netlink-bot/deploy/netlink-xray-logrotate.timer /etc/systemd/system/netlink-xray-logrotate.timer
+            systemctl daemon-reload
+            systemctl enable --now netlink-xray-logrotate.timer >/dev/null
+            [ "$(systemctl is-enabled netlink-xray-logrotate.timer)" = "enabled" ] \
+              || { echo "ABORT: logrotate timer not enabled"; exit 28; }
+            systemctl start netlink-xray-logrotate.service
+            # SuccessExitStatus=3 in the unit makes lock contention (exit 3) a
+            # success too; judge by Result, not by ExecMainStatus alone
+            LR_RESULT="$(systemctl show netlink-xray-logrotate.service -p Result --value)"
+            LR_STATUS="$(systemctl show netlink-xray-logrotate.service -p ExecMainStatus --value)"
+            echo "logrotate service Result=$LR_RESULT ExecMainStatus=$LR_STATUS (0=ran, 3=lock skipped)"
+            [ "$LR_RESULT" = "success" ] || { echo "ABORT: hourly logrotate service Result=$LR_RESULT"; exit 29; }
+
+            echo "=== STEP 2: netlink.db backup units + first VERIFIED backup ==="
+            install -m 644 /opt/netlink-bot/deploy/netlink-db-backup.service /etc/systemd/system/netlink-db-backup.service
+            install -m 644 /opt/netlink-bot/deploy/netlink-db-backup.timer /etc/systemd/system/netlink-db-backup.timer
+            systemctl daemon-reload
+            systemctl enable --now netlink-db-backup.timer >/dev/null
+            [ "$(systemctl is-enabled netlink-db-backup.timer)" = "enabled" ] \
+              || { echo "ABORT: backup timer not enabled"; exit 25; }
+            systemctl start netlink-db-backup.service
+            # oneshot proof: successful start exit code is already enforced by set -e;
+            # additionally require explicit success Result and ExecMainStatus=0
+            RESULT="$(systemctl show netlink-db-backup.service -p Result --value)"
+            MAIN_STATUS="$(systemctl show netlink-db-backup.service -p ExecMainStatus --value)"
+            echo "backup service Result=$RESULT ExecMainStatus=$MAIN_STATUS"
+            [ "$RESULT" = "success" ] || { echo "ABORT: backup service Result=$RESULT"; exit 26; }
+            [ "$MAIN_STATUS" = "0" ] || { echo "ABORT: backup service ExecMainStatus=$MAIN_STATUS"; exit 27; }
+            bash /opt/netlink-bot/scripts/verify_backup.sh /var/backups/netlink
+
+            echo "=== STEP 3: xray loglevel -> warning (source of truth) ==="
+            python3 /opt/netlink-bot/scripts/set_xray_loglevel.py --db /etc/x-ui/x-ui.db --loglevel warning --apply --backup-dir "$SNAP"
+            echo "--- restarting x-ui to regenerate xray config (brief reconnect for clients) ---"
+            systemctl restart x-ui
+            sleep 5
+            systemctl is-active --quiet x-ui || { echo "ABORT: x-ui not active after restart"; exit 30; }
+            python3 -c 'import json,sys; lvl=json.load(open("/usr/local/x-ui/bin/config.json")).get("log",{}).get("loglevel"); print(f"generated config.json loglevel: {lvl}"); sys.exit(0 if lvl=="warning" else 1)' || { echo "ABORT: loglevel did not propagate to generated config"; exit 32; }
+            ss -tln | grep -q ":443 " || { echo "ABORT: nothing listening on :443"; exit 31; }
+            # :443 listening proves the socket; real serving proof = returning client
+            # connections. No client credential is used here: a full end-to-end
+            # proxy test is impossible without one and is intentionally NOT faked.
+            ESTABLISHED=0
+            for i in $(seq 1 9); do
+              ESTABLISHED="$(ss -tn state established '( sport = :443 )' | tail -n +2 | wc -l)"
+              echo "established on :443 after ${i}x5s: $ESTABLISHED"
+              [ "$ESTABLISHED" -gt 0 ] && break
+              sleep 5
+            done
+            [ "$ESTABLISHED" -gt 0 ] || { echo "ABORT: :443 listening but no client connections returned within 45s - verify manually"; exit 33; }
+            echo "xray up on :443 with loglevel=warning and live client connections"
+
+            echo "=== STEP 4: swap ==="
+            bash /opt/netlink-bot/scripts/setup_swap.sh --apply
+
+            echo "=== STEP 5: journald limits ==="
+            bash /opt/netlink-bot/scripts/install_journald_limits.sh --apply
+
+            echo "=== VERIFY: after-report ==="
+            free -h
+            swapon --show
+            df -h /
+            journalctl --disk-usage | head -1
+            logrotate -s /tmp/netlink-stabilize-state2 -d /etc/logrotate.d/xray 2>&1 | grep -q "rotating pattern" \
+              || { echo "ABORT: logrotate config invalid in final verification"; exit 40; }
+            echo "logrotate config: VALID"
+            for s in x-ui netlink-bot netlink-profile; do
+              systemctl is-active --quiet "$s" || { echo "ABORT: $s not active"; exit 41; }
+              echo "$s: active"
+            done
+            # oneshot service: inactive after success is NORMAL, judge by Result
+            echo "netlink-db-backup.service: Result=$(systemctl show netlink-db-backup.service -p Result --value) (inactive is expected for oneshot)"
+            echo "netlink-xray-logrotate.service: Result=$(systemctl show netlink-xray-logrotate.service -p Result --value) (inactive is expected for oneshot)"
+            systemctl list-timers --no-pager | grep -E "netlink-db-backup|netlink-xray-logrotate|netlink-ip-monitor|netlink-temp-cleanup"
+            curl -fs -o /dev/null -w "profile healthz: HTTP %{http_code}\n" http://127.0.0.1:8080/healthz \
+              || { echo "ABORT: profile server healthz failed"; exit 42; }
+            ss -tln | grep -q ":443 " || { echo "ABORT: :443 not listening in final verification"; exit 43; }
+            echo ":443 listening: yes"
+            echo "=== DONE: stabilization applied and verified (no reboot performed) ==="
