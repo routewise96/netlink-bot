@@ -49,10 +49,18 @@ jobs:
             install -m 644 deploy/netlink-temp-cleanup.service /etc/systemd/system/netlink-temp-cleanup.service
             install -m 644 deploy/netlink-temp-cleanup.timer /etc/systemd/system/netlink-temp-cleanup.timer
 
+            # Install/refresh netlink.db backup (oneshot + timer)
+            install -m 644 deploy/netlink-db-backup.service /etc/systemd/system/netlink-db-backup.service
+            install -m 644 deploy/netlink-db-backup.timer /etc/systemd/system/netlink-db-backup.timer
+
+            # Install/refresh xray logrotate policy (daily, rotate 7, 100M cap)
+            install -m 644 deploy/xray-logs /etc/logrotate.d/xray
+
             systemctl daemon-reload
             systemctl enable netlink-profile.service >/dev/null
             systemctl enable --now netlink-ip-monitor.timer >/dev/null
             systemctl enable --now netlink-temp-cleanup.timer >/dev/null
+            systemctl enable --now netlink-db-backup.timer >/dev/null
 
             # Open subscription port (idempotent)
             ufw allow 8080/tcp >/dev/null 2>&1 || true
