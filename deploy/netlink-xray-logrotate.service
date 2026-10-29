@@ -1,0 +1,13 @@
+[Unit]
+Description=NetLink hourly xray log check (maxsize enforcement)
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+# Uses the standard logrotate state (/var/lib/logrotate/status), same as the
+# system logrotate, so both runs share one rotation history.
+# Exit code 3 = state lock held by a concurrent logrotate run: acceptable
+# transient state, the next timer run re-checks.
+SuccessExitStatus=3
+ExecStart=/usr/sbin/logrotate /etc/logrotate.d/xray
