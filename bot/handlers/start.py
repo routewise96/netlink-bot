@@ -73,7 +73,7 @@ async def cmd_start(message: Message, state: FSMContext):
     if user and user["status"] == "approved":
         await message.answer(
             "🔒 <b>NetLink</b> — защищённый доступ\n\nВыберите действие:",
-            reply_markup=main_menu_kb(),
+            reply_markup=main_menu_kb(telegram_id),
             parse_mode="HTML",
         )
         return

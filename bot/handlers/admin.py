@@ -312,7 +312,7 @@ async def approve_request(callback: CallbackQuery, state: FSMContext):
         for i, m in enumerate(messages):
             await callback.bot.send_message(
                 telegram_id, m,
-                reply_markup=main_menu_kb() if i == len(messages) - 1 else None,
+                reply_markup=main_menu_kb(telegram_id) if i == len(messages) - 1 else None,
                 parse_mode="HTML",
             )
             await asyncio.sleep(0.3)
@@ -563,7 +563,7 @@ async def unblock_user(callback: CallbackQuery):
         await callback.bot.send_message(
             telegram_id,
             "🟢 Ваш доступ восстановлен!",
-            reply_markup=main_menu_kb(),
+            reply_markup=main_menu_kb(telegram_id),
         )
     except Exception:
         pass
@@ -751,7 +751,7 @@ async def add_device_approve(callback: CallbackQuery):
     try:
         await callback.bot.send_message(
             telegram_id, user_text,
-            reply_markup=main_menu_kb(),
+            reply_markup=main_menu_kb(telegram_id),
             parse_mode="HTML",
         )
     except Exception:
