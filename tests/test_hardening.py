@@ -434,7 +434,8 @@ class TestOneshotSemanticsInWorkflow(unittest.TestCase):
 
     def test_backup_proof_uses_verify_script_and_gates(self):
         self.assertIn("verify_backup.sh", self.raw)
-        self.assertIn("ABORT: backup service", self.raw)
+        self.assertIn('abort 26 "backup service Result=', self.raw)
+        self.assertIn('abort 27 "backup service ExecMainStatus=', self.raw)
 
     def test_no_remainafterexit_added(self):
         unit = (DEPLOY / "netlink-db-backup.service").read_text()
@@ -476,7 +477,7 @@ class TestXrayLogrotateHourlyUnits(unittest.TestCase):
         self.assertIn("is-enabled netlink-xray-logrotate.timer", self.stab)
         self.assertIn("systemctl start netlink-xray-logrotate.service", self.stab)
         # judged by Result (SuccessExitStatus=3 makes ExecMainStatus 0 or 3 fine)
-        self.assertIn("ABORT: hourly logrotate service", self.stab)
+        self.assertIn('abort 29 "hourly logrotate service Result=', self.stab)
         # present in the final after-report
         self.assertRegex(self.stab, r"list-timers[^\n]*netlink-xray-logrotate")
 
@@ -488,6 +489,92 @@ class TestXrayLogrotateHourlyUnits(unittest.TestCase):
         self.assertIn("daily", cfg)
         self.assertIn("maxsize 100M", cfg)
         self.assertIsNone(re.search(r"^\s*size\s+\S+", cfg, re.MULTILINE))
+
+
+class TestWorkflowNoPipefailTraps(unittest.TestCase):
+    """Regression for run 40888505148: `cmd | grep -q ...` under `set -o pipefail`.
+
+    grep -q exits on first match -> upstream producer can get SIGPIPE (141)
+    -> pipeline fails despite the check succeeding -> false ABORT on a valid
+    state. The stabilize workflow must not contain piped grep -q/-qw/-qx
+    inside its SSH script (here-string grep without a producer pipe is fine).
+    """
+
+    PIPE_GREP_Q = re.compile(r"\|\s*grep\s+-\w*q")
+
+    def test_stabilize_has_no_piped_grep_q(self):
+        raw = (WORKFLOWS / "stabilize-legacy.yml").read_text()
+        offenders = [line.strip() for line in raw.splitlines()
+                     if self.PIPE_GREP_Q.search(line)]
+        self.assertEqual(
+            offenders, [],
+            "piped grep -q* found in stabilize workflow (pipefail+SIGPIPE "
+            "false-failure risk):\n" + "\n".join(offenders))
+
+
+class TestHotfixWorkflowControlFlow(unittest.TestCase):
+    """Regression tests for the pipefail/SIGPIPE hotfix (run 40888505148)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.raw = (WORKFLOWS / "stabilize-legacy.yml").read_text()
+
+    def test_both_logrotate_validations_capture_output(self):
+        # two separate captures: initial validation + final verification
+        self.assertRegex(self.raw, r'LOGROTATE_DEBUG="\$\(logrotate .*2>&1\)"')
+        self.assertRegex(self.raw, r'LOGROTATE_DEBUG2="\$\(logrotate .*2>&1\)"')
+
+    def test_logrotate_exit_code_is_really_checked(self):
+        self.assertIn('if ! LOGROTATE_DEBUG="$(logrotate', self.raw)
+        self.assertIn('if ! LOGROTATE_DEBUG2="$(logrotate', self.raw)
+
+    def test_initial_validation_hard_abort(self):
+        self.assertGreaterEqual(self.raw.count("abort 24"), 2)  # parser rc + marker
+
+    def test_final_validation_hard_abort(self):
+        self.assertGreaterEqual(self.raw.count("abort 40"), 2)
+
+    def test_ip_gate_preserved_without_pipeline(self):
+        self.assertIn('IP_OUTPUT="$(ip -4 addr show)"', self.raw)
+        self.assertIn('grep -qw "$EXPECTED_IP" <<<"$IP_OUTPUT"', self.raw)
+        self.assertIn('abort 21 "expected IP not present on interfaces"', self.raw)
+        self.assertNotIn("ip -4 addr show |", self.raw)
+
+    def test_both_443_gates_preserved_without_pipeline(self):
+        self.assertIn('LISTEN443="$(ss -tln)"', self.raw)
+        self.assertIn('LISTEN443B="$(ss -tln)"', self.raw)
+        self.assertIn('[[ "$LISTEN443" == *":443 "* ]] || abort 31', self.raw)
+        self.assertIn('[[ "$LISTEN443B" == *":443 "* ]] || abort 43', self.raw)
+        self.assertNotIn("ss -tln |", self.raw)
+
+    def test_no_journalctl_head_pipeline(self):
+        self.assertNotIn("journalctl --disk-usage | head", self.raw)
+        # plain invocation present (compact output already), one full line
+        self.assertIsNotNone(
+            re.search(r"^\s*journalctl --disk-usage\s*$", self.raw, re.MULTILINE),
+            "journalctl --disk-usage must run without a pipe")
+
+    def test_abort_helper_prints_rollback_material(self):
+        self.assertIn("abort() {", self.raw)
+        self.assertIn('echo "Rollback material: $SNAP ; runbook: docs/LEGACY_HARDENING.md"',
+                      self.raw)
+        self.assertIn('echo "ABORT: $* (exit code $code)"', self.raw)
+
+    def test_exit_trap_for_unexpected_failures_only(self):
+        self.assertIn("trap 'rc=$?", self.raw)
+        self.assertIn("STABILIZE FAILED rc=$rc", self.raw)
+        # trap must not fire on success and must not alter rc
+        self.assertIn('[ "$rc" -ne 0 ]', self.raw)
+        self.assertIn('ABORTED=1', self.raw)
+
+    def test_no_bare_echo_exit_gates(self):
+        # controlled aborts must use abort(); the old form
+        # '|| { echo "ABORT ..."; exit N; }' is forbidden. Printing extra
+        # diagnostics before abort() (e.g. captured logrotate output) is fine.
+        self.assertIsNone(re.search(r'\{\s*echo\s+"ABORT', self.raw))
+        self.assertIsNone(re.search(r'\|\|\s*\{[^}]*;\s*exit\s+\d+\s*;\s*\}', self.raw))
+        # and there are many controlled abort gates
+        self.assertGreaterEqual(len(re.findall(r"abort \d+ ", self.raw)), 12)
 
 
 class TestWorkflowsStatic(unittest.TestCase):
@@ -585,10 +672,11 @@ class TestWorkflowsStatic(unittest.TestCase):
         raw = (WORKFLOWS / "stabilize-legacy.yml").read_text()
         # healthz must fail the run (curl -f), :443 checks must abort
         self.assertIn("curl -fs", raw)
-        self.assertIn("ABORT: profile server healthz failed", raw)
-        self.assertIn("ABORT: :443 not listening", raw)
+        self.assertIn('abort 42 "profile server healthz failed"', raw)
+        self.assertIn('abort 43 ":443 not listening in final verification"', raw)
         # logrotate validation gates abort in BOTH places (apply + final verify)
-        self.assertEqual(raw.count("ABORT: logrotate config"), 2)
+        self.assertGreaterEqual(raw.count("abort 24"), 2)
+        self.assertGreaterEqual(raw.count("abort 40"), 2)
         # no validation line may be swallowed by || true
         for line in raw.splitlines():
             if "rotating pattern" in line:
