@@ -102,7 +102,7 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.answer(
         "🔒 <b>NetLink</b> — защищённый доступ\n\nВыберите действие:",
-        reply_markup=main_menu_kb(),
+        reply_markup=main_menu_kb(callback.from_user.id),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -140,7 +140,7 @@ async def show_instruction(callback: CallbackQuery):
     if not active:
         await callback.message.answer(
             "У вас нет активных подписок.",
-            reply_markup=main_menu_kb(),
+            reply_markup=main_menu_kb(callback.from_user.id),
             parse_mode="HTML",
         )
         await callback.answer()
@@ -150,7 +150,7 @@ async def show_instruction(callback: CallbackQuery):
         await callback.message.answer(render_subscription_block(d["sub_id"]), parse_mode="HTML")
     await callback.message.answer(
         "Выберите действие:",
-        reply_markup=main_menu_kb(),
+        reply_markup=main_menu_kb(callback.from_user.id),
     )
     await callback.answer()
 
@@ -187,7 +187,7 @@ async def show_devices(callback: CallbackQuery):
 
     await callback.message.answer(
         "\n".join(lines),
-        reply_markup=main_menu_kb(),
+        reply_markup=main_menu_kb(callback.from_user.id),
         parse_mode="HTML",
     )
     await callback.answer()

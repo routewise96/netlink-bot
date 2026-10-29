@@ -10,7 +10,7 @@ from aiogram.types import BotCommand, MenuButtonCommands
 
 from bot.config import ADMIN_CHAT_ID, BOT_TOKEN, RESERVED_EMAILS
 from bot.db.models import init_db
-from bot.handlers import start, user, admin
+from bot.handlers import netlink_v2, start, user, admin
 from bot.services.proxy import check_reserved_emails
 
 logging.basicConfig(
@@ -59,6 +59,7 @@ async def main():
     dp.include_router(start.router)
     dp.include_router(user.router)
     dp.include_router(admin.router)
+    dp.include_router(netlink_v2.router)
 
     await bot.set_my_commands([
         BotCommand(command="start", description="Главное меню"),
