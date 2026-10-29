@@ -44,6 +44,8 @@ jobs:
           test -f scripts/netlink_db_backup.py
           test -f scripts/verify_backup.sh
           test -f deploy/xray-logs
+          test -f deploy/netlink-xray-logrotate.service
+          test -f deploy/netlink-xray-logrotate.timer
           test -f deploy/netlink-db-backup.service
           test -f deploy/netlink-db-backup.timer
           echo "local preflight OK"
@@ -92,11 +94,26 @@ jobs:
             swapon --show > "$SNAP/swapon.txt" 2>/dev/null || true
             ls -la "$SNAP"
 
-            echo "=== STEP 1: xray logrotate policy ==="
+            echo "=== STEP 1: xray logrotate policy + hourly maxsize enforcement ==="
             install -m 644 /opt/netlink-bot/deploy/xray-logs /etc/logrotate.d/xray
             logrotate -s /tmp/netlink-stabilize-state -d /etc/logrotate.d/xray 2>&1 | grep -q "rotating pattern" \
               || { echo "ABORT: logrotate config failed validation"; exit 24; }
             echo "logrotate policy installed and validated"
+            # daily stays the base policy; the hourly unit enforces maxsize 100M
+            # between daily runs. Installed ONLY here (manual), not by deploy.yml.
+            install -m 644 /opt/netlink-bot/deploy/netlink-xray-logrotate.service /etc/systemd/system/netlink-xray-logrotate.service
+            install -m 644 /opt/netlink-bot/deploy/netlink-xray-logrotate.timer /etc/systemd/system/netlink-xray-logrotate.timer
+            systemctl daemon-reload
+            systemctl enable --now netlink-xray-logrotate.timer >/dev/null
+            [ "$(systemctl is-enabled netlink-xray-logrotate.timer)" = "enabled" ] \
+              || { echo "ABORT: logrotate timer not enabled"; exit 28; }
+            systemctl start netlink-xray-logrotate.service
+            # SuccessExitStatus=3 in the unit makes lock contention (exit 3) a
+            # success too; judge by Result, not by ExecMainStatus alone
+            LR_RESULT="$(systemctl show netlink-xray-logrotate.service -p Result --value)"
+            LR_STATUS="$(systemctl show netlink-xray-logrotate.service -p ExecMainStatus --value)"
+            echo "logrotate service Result=$LR_RESULT ExecMainStatus=$LR_STATUS (0=ran, 3=lock skipped)"
+            [ "$LR_RESULT" = "success" ] || { echo "ABORT: hourly logrotate service Result=$LR_RESULT"; exit 29; }
 
             echo "=== STEP 2: netlink.db backup units + first VERIFIED backup ==="
             install -m 644 /opt/netlink-bot/deploy/netlink-db-backup.service /etc/systemd/system/netlink-db-backup.service
@@ -156,7 +173,8 @@ jobs:
             done
             # oneshot service: inactive after success is NORMAL, judge by Result
             echo "netlink-db-backup.service: Result=$(systemctl show netlink-db-backup.service -p Result --value) (inactive is expected for oneshot)"
-            systemctl list-timers --no-pager | grep -E "netlink-db-backup|netlink-ip-monitor|netlink-temp-cleanup"
+            echo "netlink-xray-logrotate.service: Result=$(systemctl show netlink-xray-logrotate.service -p Result --value) (inactive is expected for oneshot)"
+            systemctl list-timers --no-pager | grep -E "netlink-db-backup|netlink-xray-logrotate|netlink-ip-monitor|netlink-temp-cleanup"
             curl -fs -o /dev/null -w "profile healthz: HTTP %{http_code}\n" http://127.0.0.1:8080/healthz \
               || { echo "ABORT: profile server healthz failed"; exit 42; }
             ss -tln | grep -q ":443 " || { echo "ABORT: :443 not listening in final verification"; exit 43; }
