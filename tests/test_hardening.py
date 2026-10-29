@@ -319,11 +319,19 @@ class TestLogrotateConfig(unittest.TestCase):
         self.cfg = (DEPLOY / "xray-logs").read_text()
 
     def test_required_directives(self):
-        for token in ("daily", "size 100M", "rotate 7", "compress", "delaycompress",
+        for token in ("daily", "maxsize 100M", "rotate 7", "compress", "delaycompress",
                       "missingok", "notifempty", "copytruncate", "su root root"):
             self.assertIn(token, self.cfg)
         self.assertIn("/var/log/xray-access.log", self.cfg)
         self.assertIn("/var/log/xray-error.log", self.cfg)
+
+    def test_no_standalone_size_directive(self):
+        # `size` overrides/removes the time interval in logrotate; only maxsize
+        # (rotate at least daily, earlier if bigger) implements the target.
+        standalone = re.search(r"^\s*size\s+\S+", self.cfg, re.MULTILINE)
+        self.assertIsNone(standalone,
+                          "standalone `size` directive must not be present "
+                          "(it cancels `daily`)")
 
     @unittest.skipUnless(shutil.which("logrotate"), "logrotate not installed")
     def test_logrotate_parses_and_dryruns(self):
@@ -346,6 +354,91 @@ class TestLogrotateConfig(unittest.TestCase):
                 self.assertIn("switching euid", out)
             else:
                 self.assertEqual(r.returncode, 0, out)
+
+
+class TestVerifyBackupScript(unittest.TestCase):
+    """Regression: proof of a successful oneshot backup (fresh/non-empty/integrity)."""
+
+    def run_verify(self, bdir, max_age=None):
+        env = dict(os.environ)
+        if max_age is not None:
+            env["VERIFY_MAX_AGE_SEC"] = str(max_age)
+        return subprocess.run(
+            ["bash", str(SCRIPTS / "verify_backup.sh"), str(bdir)],
+            capture_output=True, text=True, env=env,
+        )
+
+    @staticmethod
+    def make_valid_backup(path):
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, fio TEXT)")
+        conn.execute("INSERT INTO users (fio) VALUES ('u1')")
+        conn.commit(); conn.close()
+
+    def test_syntax(self):
+        r = subprocess.run(["bash", "-n", str(SCRIPTS / "verify_backup.sh")])
+        self.assertEqual(r.returncode, 0)
+
+    def test_fresh_valid_backup_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.make_valid_backup(Path(td) / "netlink-20261029-010101.db")
+            r = self.run_verify(td)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("integrity_check=ok", r.stdout)
+
+    def test_stale_backup_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "netlink-old.db"
+            self.make_valid_backup(f)
+            old = f.stat().st_mtime - 7200
+            os.utime(f, (old, old))
+            r = self.run_verify(td)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("stale", r.stderr)
+
+    def test_empty_backup_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "netlink-empty.db").write_bytes(b"")
+            r = self.run_verify(td)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("empty", r.stderr)
+
+    def test_corrupt_backup_fails_integrity(self):
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "netlink-corrupt.db").write_bytes(b"this is not sqlite" * 100)
+            r = self.run_verify(td)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("integrity_check failed", r.stderr)
+
+    def test_missing_directory_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            r = self.run_verify(Path(td) / "nope")
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("no netlink-", r.stderr)
+
+
+class TestOneshotSemanticsInWorkflow(unittest.TestCase):
+    """Regression: workflow must not judge a successful oneshot by is-active."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.raw = (WORKFLOWS / "stabilize-legacy.yml").read_text()
+
+    def test_uses_result_not_isactive_for_oneshot(self):
+        self.assertIn("-p Result", self.raw)
+        self.assertIn("-p ExecMainStatus", self.raw)
+        self.assertNotIn("is-active netlink-db-backup.service", self.raw)
+        self.assertNotIn("is-active --quiet netlink-db-backup", self.raw)
+        # after-report must explain inactive as normal for oneshot
+        self.assertIn("inactive is expected for oneshot", self.raw)
+
+    def test_backup_proof_uses_verify_script_and_gates(self):
+        self.assertIn("verify_backup.sh", self.raw)
+        self.assertIn("ABORT: backup service", self.raw)
+
+    def test_no_remainafterexit_added(self):
+        unit = (DEPLOY / "netlink-db-backup.service").read_text()
+        self.assertNotIn("RemainAfterExit", unit)
 
 
 class TestWorkflowsStatic(unittest.TestCase):
@@ -381,20 +474,90 @@ class TestWorkflowsStatic(unittest.TestCase):
                     "shutdown -h", "reboot now", "/sbin/reboot", "/sbin/shutdown"):
             self.assertNotIn(cmd, raw)
 
-    def test_deploy_still_push_main_and_installs_new_units(self):
+    def test_deploy_is_push_main_only(self):
         doc = self.load("deploy.yml")
         triggers = doc[True] if True in doc else doc["on"]
         self.assertEqual(triggers["push"]["branches"], ["main"])
+        self.assertEqual(len(triggers), 1, "deploy.yml must not gain new triggers")
+
+    def test_merge_does_not_install_hardening_artifacts(self):
+        """Regression: merging this PR must NOT roll out hardening.
+
+        deploy.yml must stay byte-identical in behavior to pre-PR: no backup
+        units, no xray logrotate install, no backup timer enable.
+        """
         raw = (WORKFLOWS / "deploy.yml").read_text()
-        self.assertIn("netlink-db-backup.service", raw)
-        self.assertIn("netlink-db-backup.timer", raw)
-        self.assertIn("/etc/logrotate.d/xray", raw)
+        for banned in ("netlink-db-backup.service", "netlink-db-backup.timer",
+                       "netlink-db-backup", "/etc/logrotate.d/xray", "deploy/xray-logs"):
+            self.assertNotIn(banned, raw,
+                             f"deploy.yml must not reference hardening artifact {banned!r}")
+        # and it must still do its original job
+        for needed in ("netlink-profile.service", "netlink-ip-monitor.timer",
+                       "netlink-temp-cleanup.timer"):
+            self.assertIn(needed, raw)
+
+    def test_deploy_yml_identical_to_main(self):
+        """Strongest form: the file matches main exactly (no diff at all)."""
+        import subprocess as sp
+        r = sp.run(["git", "diff", "main", "--", ".github/workflows/deploy.yml"],
+                   cwd=REPO, capture_output=True, text=True)
+        self.assertEqual(r.stdout, "", "deploy.yml must not differ from main")
+
+    def test_hardening_installs_live_only_in_stabilize(self):
+        stab = (WORKFLOWS / "stabilize-legacy.yml").read_text()
+        for artifact in ("netlink-db-backup.service", "netlink-db-backup.timer",
+                         "/etc/logrotate.d/xray"):
+            self.assertIn(artifact, stab,
+                          f"stabilize workflow must install {artifact!r}")
+        self.assertIn("setup_swap.sh --apply", stab)
+        self.assertIn("install_journald_limits.sh --apply", stab)
+        self.assertIn("set_xray_loglevel.py", stab)
 
     def test_stabilize_verification_section(self):
         raw = (WORKFLOWS / "stabilize-legacy.yml").read_text()
         for token in ("free -h", "swapon --show", "df -h", "journalctl --disk-usage",
                       "healthz", ":443", "logrotate"):
             self.assertIn(token, raw)
+
+    def test_stabilize_failures_are_hard_not_informational(self):
+        """Regression: checks must abort, not just print."""
+        raw = (WORKFLOWS / "stabilize-legacy.yml").read_text()
+        # healthz must fail the run (curl -f), :443 checks must abort
+        self.assertIn("curl -fs", raw)
+        self.assertIn("ABORT: profile server healthz failed", raw)
+        self.assertIn("ABORT: :443 not listening", raw)
+        # logrotate validation gates abort in BOTH places (apply + final verify)
+        self.assertEqual(raw.count("ABORT: logrotate config"), 2)
+        # no validation line may be swallowed by || true
+        for line in raw.splitlines():
+            if "rotating pattern" in line:
+                self.assertNotIn("|| true", line)
+        # x-ui liveness beyond the socket: returning client connections
+        self.assertIn("established", raw)
+        self.assertIn("no client connections returned", raw)
+
+    def test_stabilize_err_trap_points_to_rollback(self):
+        raw = (WORKFLOWS / "stabilize-legacy.yml").read_text()
+        self.assertIn("trap '", raw)
+        self.assertIn("STABILIZE FAILED", raw)
+        self.assertIn("Rollback material", raw)
+
+
+class TestCiWorkflowStatic(unittest.TestCase):
+    def test_ci_triggers(self):
+        import yaml
+        doc = yaml.safe_load((WORKFLOWS / "test.yml").read_text())
+        triggers = doc[True] if True in doc else doc["on"]
+        self.assertIn("pull_request", triggers)
+        self.assertIn("push", triggers)
+        self.assertEqual(triggers["push"]["branches-ignore"], ["main"])
+
+    def test_ci_is_safe_no_ssh_no_secrets_no_deploy(self):
+        raw = (WORKFLOWS / "test.yml").read_text()
+        self.assertIn("run_tests.sh", raw)
+        for banned in ("ssh-action", "secrets.", "SSH_PRIVATE_KEY", "scp ",
+                       "rsync ", "systemctl", "153.75.85.138", "appleboy"):
+            self.assertNotIn(banned, raw, f"CI must not contain {banned!r}")
 
 
 if __name__ == "__main__":

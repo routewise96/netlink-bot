@@ -8,7 +8,7 @@
 | Проблема (факт аудита 29.10.2026) | Решение |
 |---|---|
 | Xray работает с `loglevel=debug`; error-лог растёт ~сотни МБ/сутки (452M + 135M на момент аудита); на этом сервере уже был OOM-kill Xray 26.06.2026 | `scripts/set_xray_loglevel.py`: правит source of truth (settings.xrayTemplateConfig в БД 3x-ui) → `warning`; регенерация конфига панелью больше не вернёт debug |
-| Ротация xray-логов была `size 100M, rotate 3` без daily | `deploy/xray-logs`: daily + size 100M + rotate 7 + compress + delaycompress + copytruncate (copytruncate сохранён — Xray держит логи открытыми, сигнал не нужен) |
+| Ротация xray-логов была `size 100M, rotate 3` без daily | `deploy/xray-logs`: **daily + maxsize 100M** + rotate 7 + compress + delaycompress + copytruncate (copytruncate сохранён — Xray держит логи открытыми, сигнал не нужен). Семантика: ротация минимум раз в сутки; если лог превысил 100M раньше — ротация разрешена раньше. Именно `maxsize`, не `size`: в logrotate `size` взаимоисключим с интервалом (последняя директива побеждает), `size 100M` отменил бы `daily` |
 | RAM 1.9 GiB, swap отсутствует (прецедент OOM) | `scripts/setup_swap.sh`: 2 GiB /swapfile, 0600, persistent fstab, vm.swappiness=10, идемпотентно |
 | journald ~1.7 GiB без лимитов | `scripts/install_journald_limits.sh`: drop-in SystemMaxUse=256M / RuntimeMaxUse=64M / MaxRetentionSec=14day + vacuum |
 | netlink.db без регулярного бэкапа | `scripts/netlink_db_backup.py` + `deploy/netlink-db-backup.{service,timer}`: daily 03:30 UTC, SQLite Online Backup API (консистентно на живой базе), PRAGMA integrity_check копии, retention 14, /var/backups/netlink 0700 |
@@ -25,9 +25,15 @@ workflow, не скриптом.
 
 Access-log НЕ отключается: его парсит netlink-ip-monitor (детект шаринга).
 
-## Как применяется (только вручную)
+## Применение: merge ≠ rollout
 
-GitHub Actions → **Stabilize legacy NetLink (manual)** → Run workflow →
+Все hardening-артефакты этого PR (backup-юниты, logrotate-политика) ставятся
+ТОЛЬКО ручным workflow. Обычный `deploy.yml` после merge ведёт себя точно так
+же, как до PR: merge в main сам по себе ничего не устанавливает и не меняет
+production. Follow-up PR после успешного rollout научит обычный deploy
+поддерживать уже установленный hardening.
+
+Запуск: GitHub Actions → **Stabilize legacy NetLink (manual)** → Run workflow →
 в поле confirm ввести `stabilize`.
 
 Шаги workflow (полностью идемпотентны, повторный запуск безопасен):
@@ -39,13 +45,24 @@ GitHub Actions → **Stabilize legacy NetLink (manual)** → Run workflow →
 4. Timestamped snapshot всего, что будет затронуто: консистентная копия
    x-ui.db (sqlite .backup), /etc/logrotate.d/xray, /etc/fstab, journald
    drop-ins, снимки free/df/swapon → `/root/netlink-stabilize-backups/<ts>/`.
-5. Установка logrotate-политики и backup-юнитов; первый бэкап немедленно.
+5. Установка logrotate-политики (с валидацией парсера) и backup-юнитов;
+   первый бэкап немедленно и с ДОКАЗАТЕЛЬСТВОМ: успешный exit код
+   `systemctl start` (oneshot), `Result=success`, `ExecMainStatus=0`, свежий
+   ненулевой файл, открывается SQLite, `integrity_check=ok`
+   (`scripts/verify_backup.sh`). Для oneshot-сервиса `inactive` после успеха —
+   норма, статус оценивается по `Result`, не по `is-active`.
 6. loglevel → warning в БД + `systemctl restart x-ui` (краткий реконнект
    клиентов, секунды) + проверка: x-ui active, config.json = warning, :443 слушает.
 7. Swap (2G) + swappiness 10.
 8. Journald drop-in + restart journald (штатно-безопасная операция) + vacuum.
-9. After-отчёт: free/swapon/df/journal usage/logrotate validation/статусы
-   сервисов и таймеров/healthz/:443. Reboot НЕ выполняется.
+9. После restart x-ui: проверка не только listening на :443, но и возврата
+   клиентских established-соединений в течение 45 с (реальный признак
+   обслуживания без использования credential). Полный end-to-end тест
+   проксирования без клиентского секрета невозможен и сознательно не
+   имитируется.
+10. After-отчёт: free/swapon/df/journal usage/logrotate validation/статусы
+    сервисов и таймеров/healthz/:443; любая невязка — ABORT с кодом. Reboot НЕ
+    выполняется. При сбое trap ERR печатает путь к rollback-материалу.
 
 Отдельные шаги НЕ выполняются автоматически по ping/мониторам — any self-healing
 restart только после отдельного проектирования health-check (вне скоупа).
@@ -73,7 +90,20 @@ restart только после отдельного проектировани�
 bash tests/run_tests.sh
 ```
 
-26 проверок: идемпотентность скриптов, консистентность+integrity бэкапа,
-retention, отсутствие секретов в stdout, валидность logrotate-конфига,
-статическая валидация workflows (только manual dispatch, gates, отсутствие
-reboot-команд).
+CI: `.github/workflows/test.yml` запускает `tests/run_tests.sh` на каждый
+pull_request и push в не-main ветки (без SSH/secrets/deploy).
+
+Проверки покрывают: идемпотентность скриптов; консистентность+integrity
+бэкапа; retention; отсутствие секретов в stdout; daily+maxsize 100M
+(и запрет standalone `size 100M`); реальный parse logrotate; oneshot-семантику
+и verify_backup.sh; rollout separation (deploy.yml не устанавливает
+hardening-артефакты, stabilize — manual-only); test-workflow без SSH/deploy;
+отсутствие reboot-команд.
+
+## Перевод repository в private
+
+Visibility в этом PR НЕ меняется. Замечание: production checkout использует
+HTTPS origin и выполняет `git fetch origin main`; пока repository public, это
+работает без аутентификации. Перед переводом repository в private необходимо
+настроить read-only GitHub authentication/deploy key для production checkout и
+отдельно проверить `git fetch`. Это отдельная будущая задача.
