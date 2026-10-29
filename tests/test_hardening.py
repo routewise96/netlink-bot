@@ -441,6 +441,55 @@ class TestOneshotSemanticsInWorkflow(unittest.TestCase):
         self.assertNotIn("RemainAfterExit", unit)
 
 
+class TestXrayLogrotateHourlyUnits(unittest.TestCase):
+    """Regression: hourly enforcement of maxsize between daily logrotate runs."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.svc = (DEPLOY / "netlink-xray-logrotate.service").read_text()
+        cls.timer = (DEPLOY / "netlink-xray-logrotate.timer").read_text()
+        cls.stab = (WORKFLOWS / "stabilize-legacy.yml").read_text()
+        cls.deploy = (WORKFLOWS / "deploy.yml").read_text()
+
+    def test_service_execstart_uses_system_logrotate_without_force(self):
+        self.assertIn("Type=oneshot", self.svc)
+        self.assertIn("ExecStart=/usr/sbin/logrotate /etc/logrotate.d/xray", self.svc)
+        self.assertNotIn("--force", self.svc)
+        self.assertNotIn(" -f", self.svc)
+        # must NOT use a private state file: shared rotation history with
+        # the system logrotate run
+        self.assertNotIn("-s ", self.svc)
+        self.assertNotIn("--state", self.svc)
+
+    def test_service_tolerates_lock_collision_exit_3(self):
+        self.assertIn("SuccessExitStatus=3", self.svc)
+
+    def test_timer_hourly_persistent(self):
+        self.assertIn("OnCalendar=hourly", self.timer)
+        self.assertIn("RandomizedDelaySec=10m", self.timer)
+        self.assertIn("Persistent=true", self.timer)
+
+    def test_stabilize_installs_enables_and_proves_units(self):
+        for artifact in ("netlink-xray-logrotate.service",
+                         "netlink-xray-logrotate.timer"):
+            self.assertIn(artifact, self.stab)
+        self.assertIn("is-enabled netlink-xray-logrotate.timer", self.stab)
+        self.assertIn("systemctl start netlink-xray-logrotate.service", self.stab)
+        # judged by Result (SuccessExitStatus=3 makes ExecMainStatus 0 or 3 fine)
+        self.assertIn("ABORT: hourly logrotate service", self.stab)
+        # present in the final after-report
+        self.assertRegex(self.stab, r"list-timers[^\n]*netlink-xray-logrotate")
+
+    def test_deploy_yml_does_not_know_hourly_units(self):
+        self.assertNotIn("netlink-xray-logrotate", self.deploy)
+
+    def test_logrotate_policy_unchanged(self):
+        cfg = (DEPLOY / "xray-logs").read_text()
+        self.assertIn("daily", cfg)
+        self.assertIn("maxsize 100M", cfg)
+        self.assertIsNone(re.search(r"^\s*size\s+\S+", cfg, re.MULTILINE))
+
+
 class TestWorkflowsStatic(unittest.TestCase):
     @staticmethod
     def load(name):
@@ -497,11 +546,23 @@ class TestWorkflowsStatic(unittest.TestCase):
             self.assertIn(needed, raw)
 
     def test_deploy_yml_identical_to_main(self):
-        """Strongest form: the file matches main exactly (no diff at all)."""
+        """Strongest form: the file matches main exactly (no diff at all).
+
+        Must FAIL (not silently pass) when origin/main is unavailable: an
+        empty diff from a failed git invocation would be a false positive.
+        CI checkouts use fetch-depth: 0 so origin/main is present.
+        """
         import subprocess as sp
-        r = sp.run(["git", "diff", "main", "--", ".github/workflows/deploy.yml"],
+        rr = sp.run(["git", "rev-parse", "--verify", "--quiet", "origin/main"],
+                    cwd=REPO, capture_output=True, text=True)
+        self.assertEqual(
+            rr.returncode, 0,
+            "origin/main must resolve for the deploy.yml diff check "
+            "(use fetch-depth: 0 in CI); refusing to pass on missing ref")
+        r = sp.run(["git", "diff", "origin/main", "--", ".github/workflows/deploy.yml"],
                    cwd=REPO, capture_output=True, text=True)
-        self.assertEqual(r.stdout, "", "deploy.yml must not differ from main")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "", "deploy.yml must not differ from origin/main")
 
     def test_hardening_installs_live_only_in_stabilize(self):
         stab = (WORKFLOWS / "stabilize-legacy.yml").read_text()

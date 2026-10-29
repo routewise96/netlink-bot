@@ -8,7 +8,8 @@
 | Проблема (факт аудита 29.10.2026) | Решение |
 |---|---|
 | Xray работает с `loglevel=debug`; error-лог растёт ~сотни МБ/сутки (452M + 135M на момент аудита); на этом сервере уже был OOM-kill Xray 26.06.2026 | `scripts/set_xray_loglevel.py`: правит source of truth (settings.xrayTemplateConfig в БД 3x-ui) → `warning`; регенерация конфига панелью больше не вернёт debug |
-| Ротация xray-логов была `size 100M, rotate 3` без daily | `deploy/xray-logs`: **daily + maxsize 100M** + rotate 7 + compress + delaycompress + copytruncate (copytruncate сохранён — Xray держит логи открытыми, сигнал не нужен). Семантика: ротация минимум раз в сутки; если лог превысил 100M раньше — ротация разрешена раньше. Именно `maxsize`, не `size`: в logrotate `size` взаимоисключим с интервалом (последняя директива побеждает), `size 100M` отменил бы `daily` |
+| Ротация xray-логов была `size 100M, rotate 3` без daily | `deploy/xray-logs`: **daily + maxsize 100M** + rotate 7 + compress + delaycompress + copytruncate (copytruncate сохранён — Xray держит логи открытыми, сигнал не нужен). Семантика: daily — базовая политика; maxsize позволяет раннюю ротацию, если лог превысил 100M. Именно `maxsize`, не `size`: standalone `size` взаимоисключим с интервалом и отменил бы `daily` |
+| `maxsize` проверяется только при запуске logrotate; системный прогон — раз в сутки | `netlink-xray-logrotate.service` + `.timer` (hourly + RandomizedDelaySec=10m + Persistent): hourly-прогон `/usr/sbin/logrotate /etc/logrotate.d/xray` со ШТАТНЫМ state-файлом (общая история ротаций с системным logrotate); `SuccessExitStatus=3` — конфликт state-lock с параллельным прогоном считается допустимым временным состоянием, следующий часовой запуск повторит проверку. Без `--force`. Ставится ТОЛЬКО manual workflow |
 | RAM 1.9 GiB, swap отсутствует (прецедент OOM) | `scripts/setup_swap.sh`: 2 GiB /swapfile, 0600, persistent fstab, vm.swappiness=10, идемпотентно |
 | journald ~1.7 GiB без лимитов | `scripts/install_journald_limits.sh`: drop-in SystemMaxUse=256M / RuntimeMaxUse=64M / MaxRetentionSec=14day + vacuum |
 | netlink.db без регулярного бэкапа | `scripts/netlink_db_backup.py` + `deploy/netlink-db-backup.{service,timer}`: daily 03:30 UTC, SQLite Online Backup API (консистентно на живой базе), PRAGMA integrity_check копии, retention 14, /var/backups/netlink 0700 |
@@ -72,7 +73,10 @@ restart только после отдельного проектировани�
 - loglevel: восстановить значение из
   `/root/netlink-stabilize-backups/<ts>/xrayTemplateConfig.*.json`
   (или тем же скриптом с `--loglevel debug --apply`), затем `systemctl restart x-ui`.
-- logrotate: вернуть `/root/netlink-stabilize-backups/<ts>/logrotate.xray`.
+- logrotate + hourly units: вернуть `/root/netlink-stabilize-backups/<ts>/logrotate.xray`;
+  hourly: `systemctl disable --now netlink-xray-logrotate.timer`, удалить
+  `netlink-xray-logrotate.{service,timer}` из /etc/systemd/system,
+  `systemctl daemon-reload`.
 - swap: `swapoff /swapfile`, удалить строку из /etc/fstab, удалить файл.
 - journald: удалить drop-in `/etc/systemd/journald.conf.d/90-netlink-hardening.conf`,
   `systemctl restart systemd-journald`.
