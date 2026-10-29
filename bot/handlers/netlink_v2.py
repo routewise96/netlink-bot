@@ -61,10 +61,14 @@ async def v2_enroll(callback: CallbackQuery) -> None:
     await callback.answer()
 
     config = v2_settings.load_v2_settings()
-    client = ControlPlaneClient(
-        base_url=config.base_url, internal_api_key=config.internal_api_key
-    )
+    client: ControlPlaneClient | None = None
     try:
+        # Construction happens inside the error boundary: an invalid
+        # configuration or transport failure degrades to the safe message,
+        # never an unhandled handler exception.
+        client = ControlPlaneClient(
+            base_url=config.base_url, internal_api_key=config.internal_api_key
+        )
         employee = await resolve_employee(
             client,
             telegram_id,
@@ -80,8 +84,17 @@ async def v2_enroll(callback: CallbackQuery) -> None:
         logger.warning("v2 enrollment failed (telegram_id=%s): %s", telegram_id, exc)
         await callback.message.answer(UNAVAILABLE_TEXT)
         return
+    except Exception as exc:  # noqa: BLE001 - defensive boundary for the pilot flow
+        logger.error(
+            "v2 enrollment unexpected error (telegram_id=%s): %s",
+            telegram_id,
+            type(exc).__name__,
+        )
+        await callback.message.answer(UNAVAILABLE_TEXT)
+        return
     finally:
-        await client.close()
+        if client is not None:
+            await client.close()
 
     code = enrollment.get("code")
     if not isinstance(code, str) or not code:

@@ -289,3 +289,121 @@ class TestTelegramName(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------- review fix: base URL origin policy
+
+class TestBaseUrlPolicy(unittest.TestCase):
+    """HTTPS-only for non-loopback; loopback HTTP allowed for dev."""
+
+    def setUp(self):
+        self.env = os.environ.copy()
+        for name in (
+            "NETLINK_V2_ENABLED",
+            "NETLINK_CONTROL_PLANE_URL",
+            "NETLINK_CONTROL_PLANE_INTERNAL_API_KEY",
+            "NETLINK_V2_PILOT_TELEGRAM_IDS",
+        ):
+            os.environ.pop(name, None)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.env)
+
+    def _enable(self, url: str) -> None:
+        os.environ["NETLINK_V2_ENABLED"] = "true"
+        os.environ["NETLINK_CONTROL_PLANE_URL"] = url
+        os.environ["NETLINK_CONTROL_PLANE_INTERNAL_API_KEY"] = TEST_KEY
+        os.environ["NETLINK_V2_PILOT_TELEGRAM_IDS"] = "1"
+
+    def test_https_host_valid(self):
+        self._enable("https://cp.example.com")
+        self.assertTrue(settings.is_enabled())
+        self.assertTrue(settings.is_pilot_user(1))
+
+    def test_https_trailing_slash_normalized(self):
+        self._enable("https://cp.example.com/")
+        loaded = settings.load_v2_settings()
+        self.assertEqual(loaded.base_url, "https://cp.example.com")
+
+    def test_plain_http_non_loopback_invalid(self):
+        self._enable("http://cp.example.com")
+        self.assertFalse(settings.is_enabled())
+        self.assertFalse(settings.is_pilot_user(1))
+
+    def test_loopback_http_valid(self):
+        for url, expected in (
+            ("http://localhost:8000", "http://localhost:8000"),
+            ("http://127.0.0.1:8000", "http://127.0.0.1:8000"),
+            ("http://[::1]:8000", "http://[::1]:8000"),
+        ):
+            with self.subTest(url=url):
+                self._enable(url)
+                self.assertTrue(settings.is_enabled(), url)
+                self.assertEqual(settings.load_v2_settings().base_url, expected)
+
+    def test_userinfo_forbidden(self):
+        self._enable("https://user:secretpass@cp.example.com")
+        self.assertFalse(settings.is_enabled())
+        problems = " ".join(settings.config_problems())
+        self.assertNotIn("secretpass", problems)
+
+    def test_path_prefix_forbidden(self):
+        self._enable("https://cp.example.com/api")
+        self.assertFalse(settings.is_enabled())
+
+    def test_query_forbidden(self):
+        self._enable("https://cp.example.com?x=1")
+        self.assertFalse(settings.is_enabled())
+
+    def test_fragment_forbidden(self):
+        self._enable("https://cp.example.com#frag")
+        self.assertFalse(settings.is_enabled())
+
+    def test_malformed_url_invalid(self):
+        for url in ("not-a-url", "http://", "ftp://cp.example.com", ""):
+            with self.subTest(url=url):
+                self._enable(url)
+                self.assertFalse(settings.is_enabled(), url)
+
+    def test_invalid_url_disables_feature_entirely(self):
+        self._enable("http://cp.example.com")  # flag=true, pilot set, bad url
+        self.assertFalse(settings.is_enabled())
+        self.assertFalse(settings.is_pilot_user(1))
+        self.assertTrue(any("URL" in p for p in settings.config_problems()))
+
+    def test_problems_never_echo_url_credentials(self):
+        self._enable("https://alice:hunter2@cp.example.com")
+        problems = " ".join(settings.config_problems())
+        self.assertNotIn("hunter2", problems)
+        self.assertNotIn("alice", problems)
+
+
+# --------------------------------------- review fix: redirects forbidden
+
+class TestRedirectRejection(unittest.TestCase):
+    def _client(self, status: int):
+        transport = FakeTransport(script=[(status, None)])
+        client = ControlPlaneClient(
+            base_url="https://cp.test", internal_api_key=TEST_KEY, transport=transport
+        )
+        return client, transport
+
+    def test_3xx_responses_rejected_not_followed(self):
+        for status in (301, 302, 307, 308):
+            with self.subTest(status=status):
+                client, transport = self._client(status)
+                with self.assertRaises(UnexpectedResponse) as ctx:
+                    run(client.get_employee_by_telegram(5))
+                message = str(ctx.exception)
+                self.assertIn("redirect", message.lower())
+                # exactly one request: the redirect itself, never a follow-up
+                self.assertEqual(len(transport.calls), 1)
+
+    def test_redirect_error_message_has_no_location(self):
+        client, _ = self._client(302)
+        with self.assertRaises(UnexpectedResponse) as ctx:
+            run(client.get_employee_by_telegram(5))
+        message = str(ctx.exception)
+        self.assertNotIn("http://", message)
+        self.assertNotIn("Location", message)

@@ -77,7 +77,10 @@ class AiohttpTransport:
     ) -> tuple[int, Any]:
         try:
             async with self._session.request(
-                method, path, headers=headers, json=json_body
+                # The internal Control Plane API never legitimately redirects;
+                # never following one prevents credential forwarding to
+                # whatever origin a Location header might name.
+                method, path, headers=headers, json=json_body, allow_redirects=False
             ) as response:
                 try:
                     body = await response.json(content_type=None)
@@ -140,6 +143,8 @@ class ControlPlaneClient:
         status, body = await self._transport.request(
             method, path, headers=self._headers, json_body=json_body
         )
+        if 300 <= status < 400:
+            raise UnexpectedResponse("control plane redirect rejected")
         if status >= 400:
             code = "unknown"
             if isinstance(body, dict):
