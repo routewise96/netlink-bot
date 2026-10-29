@@ -1,0 +1,125 @@
+name: Stabilize legacy NetLink (manual)
+
+# Manual-only production hardening for the legacy VPS:
+#   - Xray loglevel -> warning (changes 3x-ui source of truth, restarts x-ui)
+#   - xray logrotate policy (daily, rotate 7, 100M cap)
+#   - 2 GiB swap + vm.swappiness=10
+#   - journald limits (256M/64M/14day) + vacuum
+#   - netlink.db backup service+timer + first backup run
+#
+# Safety:
+#   - workflow_dispatch ONLY (never on push)
+#   - requires typing the confirmation word
+#   - verifies hostname + server IP on the remote side before any change
+#   - timestamped backups of everything it touches
+#   - idempotent: safe to re-run
+#   - never reboots the server
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "stabilize" to confirm'
+        required: true
+        default: ''
+
+jobs:
+  stabilize:
+    if: github.event.inputs.confirm == 'stabilize'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight gates (local)
+        run: |
+          set -euo pipefail
+          echo "ref: ${GITHUB_REF}"
+          test -f scripts/set_xray_loglevel.py
+          test -f scripts/setup_swap.sh
+          test -f scripts/install_journald_limits.sh
+          test -f scripts/netlink_db_backup.py
+          test -f deploy/xray-logs
+          test -f deploy/netlink-db-backup.service
+          test -f deploy/netlink-db-backup.timer
+          echo "local preflight OK"
+
+      - name: Apply hardening over SSH (idempotent, gated)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 153.75.85.138
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22847
+          script: |
+            set -euo pipefail
+            EXPECTED_HOSTNAME="ubuntu-Amsterdam-2gb"
+            EXPECTED_IP="153.75.85.138"
+
+            echo "=== GATE 1: identity ==="
+            ACTUAL_HOSTNAME="$(hostname)"
+            echo "hostname: $ACTUAL_HOSTNAME"
+            [ "$ACTUAL_HOSTNAME" = "$EXPECTED_HOSTNAME" ] || { echo "ABORT: hostname mismatch"; exit 20; }
+            ip -4 addr show | grep -qw "$EXPECTED_IP" || { echo "ABORT: expected IP not present on interfaces"; exit 21; }
+            ACTUAL_EGRESS="$(curl -s --max-time 10 https://api.ipify.org || true)"
+            echo "egress ip present: $([ -n "$ACTUAL_EGRESS" ] && echo yes || echo no)"
+            [ "$ACTUAL_EGRESS" = "$EXPECTED_IP" ] || { echo "ABORT: egress IP mismatch"; exit 22; }
+            echo "identity OK"
+
+            echo "=== GATE 2: code sync via official deploy channel ==="
+            cd /opt/netlink-bot
+            if [ ! -d .git ]; then echo "ABORT: /opt/netlink-bot is not a git checkout"; exit 23; fi
+            git fetch origin main
+            git reset --hard origin/main
+            git log --oneline -1
+
+            echo "=== GATE 3: timestamped backup of everything touched ==="
+            TS="$(date +%Y%m%d-%H%M%S)"
+            SNAP="/root/netlink-stabilize-backups/$TS"
+            mkdir -p "$SNAP"
+            chmod 0700 "$SNAP"
+            sqlite3 /etc/x-ui/x-ui.db ".backup '$SNAP/x-ui.db'"
+            cp -a /etc/logrotate.d/xray "$SNAP/logrotate.xray" 2>/dev/null || echo "no existing xray logrotate" | tee "$SNAP/logrotate.xray.absent"
+            cp -a /etc/fstab "$SNAP/fstab"
+            cp -a /etc/systemd/journald.conf.d "$SNAP/journald.conf.d" 2>/dev/null || true
+            free -h > "$SNAP/free.txt"; df -h / > "$SNAP/df.txt"; swapon --show > "$SNAP/swapon.txt" 2>&1 || true
+            ls -la "$SNAP"
+
+            echo "=== STEP 1: xray logrotate policy ==="
+            install -m 644 /opt/netlink-bot/deploy/xray-logs /etc/logrotate.d/xray
+            logrotate -s /tmp/netlink-stabilize-state -d /etc/logrotate.d/xray 2>&1 | head -5 || true
+
+            echo "=== STEP 2: netlink.db backup units + first run ==="
+            install -m 644 /opt/netlink-bot/deploy/netlink-db-backup.service /etc/systemd/system/netlink-db-backup.service
+            install -m 644 /opt/netlink-bot/deploy/netlink-db-backup.timer /etc/systemd/system/netlink-db-backup.timer
+            systemctl daemon-reload
+            systemctl enable --now netlink-db-backup.timer >/dev/null
+            systemctl start netlink-db-backup.service
+            systemctl is-active netlink-db-backup.service
+
+            echo "=== STEP 3: xray loglevel -> warning (source of truth) ==="
+            python3 /opt/netlink-bot/scripts/set_xray_loglevel.py --db /etc/x-ui/x-ui.db --loglevel warning --apply --backup-dir "$SNAP"
+            echo "--- restarting x-ui to regenerate xray config (brief reconnect for clients) ---"
+            systemctl restart x-ui
+            sleep 5
+            systemctl is-active --quiet x-ui || { echo "ABORT: x-ui not active after restart"; exit 30; }
+            python3 -c 'import json,sys; lvl=json.load(open("/usr/local/x-ui/bin/config.json")).get("log",{}).get("loglevel"); print(f"generated config.json loglevel: {lvl}"); sys.exit(0 if lvl=="warning" else 1)' || { echo "ABORT: loglevel did not propagate to generated config"; exit 32; }
+            ss -tln | grep -q ":443 " || { echo "ABORT: nothing listening on :443"; exit 31; }
+            echo "xray up on :443 with loglevel=warning"
+
+            echo "=== STEP 4: swap ==="
+            bash /opt/netlink-bot/scripts/setup_swap.sh --apply
+
+            echo "=== STEP 5: journald limits ==="
+            bash /opt/netlink-bot/scripts/install_journald_limits.sh --apply
+
+            echo "=== VERIFY: after-report ==="
+            free -h
+            swapon --show
+            df -h /
+            journalctl --disk-usage | head -1
+            logrotate -s /tmp/netlink-stabilize-state2 -d /etc/logrotate.d/xray 2>&1 | grep -q "rotating pattern" && echo "logrotate config: VALID" || echo "logrotate config: PARSE FAILED"
+            for s in x-ui netlink-bot netlink-profile netlink-db-backup; do echo "$s: $(systemctl is-active $s)"; done
+            systemctl list-timers --no-pager | grep -E "netlink-db-backup|netlink-ip-monitor|netlink-temp-cleanup" || true
+            curl -s -o /dev/null -w "profile healthz: %{http_code}\n" http://127.0.0.1:8080/healthz
+            ss -tln | grep -q ":443 " && echo ":443 listening: yes" || echo ":443 listening: NO"
+            echo "=== DONE (no reboot performed) ==="
