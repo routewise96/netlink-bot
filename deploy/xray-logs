@@ -1,7 +1,7 @@
 /var/log/xray-access.log /var/log/xray-error.log {
     su root root
     daily
-    size 100M
+    maxsize 100M
     rotate 7
     compress
     delaycompress
